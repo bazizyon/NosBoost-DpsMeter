@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 4.1)
-project(NosBoostModKit)
+project(DpsMeter)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -16,12 +16,12 @@ FetchContent_MakeAvailable(nosboost_sdk)
 FetchContent_Declare(
         imgui
         GIT_REPOSITORY https://github.com/ocornut/imgui.git
-        GIT_TAG master
+        GIT_TAG 691b89baae95d56df42a59b031c9d19685b7ab2f
 )
 FetchContent_MakeAvailable(imgui)
 
-add_library(ExampleMod SHARED
-        ExampleMod/ExampleMod.cpp
+add_library(DpsMeter SHARED
+        DpsMeter/DpsMeter.cpp
         WidgetKit/WidgetKit.cpp
         ${imgui_SOURCE_DIR}/imgui.cpp
         ${imgui_SOURCE_DIR}/imgui_draw.cpp
@@ -29,7 +29,7 @@ add_library(ExampleMod SHARED
         ${imgui_SOURCE_DIR}/imgui_widgets.cpp
 )
 
-target_include_directories(ExampleMod PRIVATE
+target_include_directories(DpsMeter PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
         ${CMAKE_CURRENT_SOURCE_DIR}/WidgetKit
         ${nosboost_sdk_SOURCE_DIR}/classes
@@ -40,10 +40,10 @@ target_include_directories(ExampleMod PRIVATE
         ${imgui_SOURCE_DIR}
 )
 
-target_compile_options(ExampleMod PRIVATE /EHsc /MP)
+target_compile_options(DpsMeter PRIVATE /EHsc /MP)
 
 if(NOT DEFINED ENV{CI})
-    set_target_properties(ExampleMod PROPERTIES
+    set_target_properties(DpsMeter PROPERTIES
             RUNTIME_OUTPUT_DIRECTORY "C:/Program Files (x86)/Nostale/mods"
     )
 endif()
