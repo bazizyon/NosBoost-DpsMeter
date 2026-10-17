@@ -1,5 +1,7 @@
 #include "WidgetKit.h"
+#include <algorithm>
 #include <cstddef>
+#include <iterator>
 #include <cstring>
 
 #include "TEWLabel.h"
@@ -270,6 +272,35 @@ namespace WidgetKit {
         return {Frame, Edit};
     }
 
+    TNTIconWidget* CreateItemIcon(const ModHost* Host, const int16_t X, const int16_t Y, const int16_t Size,
+                                  const int16_t IconId) {
+        TNTIconWidget* Icon = Widget::Create<TNTIconWidget>(Host);
+        if (!Icon) return nullptr;
+        auto* Raw = reinterpret_cast<uint8_t*>(Icon);
+        Icon->keepTransparency = false;
+        Icon->resized = true;
+        *reinterpret_cast<float*>(Raw + 0x90) = 1.0f;
+        Icon->imageIf = 4;
+        Raw[0xAB] = 1;
+        Raw[0xAC] = 1;
+        Raw[0xAE] = 10;
+        Raw[0xD3] = 1;
+        Icon->isInteractable = false;
+        Icon->color = Color(254, 255, 255, 255);
+        delete Icon->image;
+        Icon->image = reinterpret_cast<IconProperties*>(new uint8_t[0x40]{});
+        Icon->rect = {X, Y, static_cast<int16_t>(X + Size), static_cast<int16_t>(Y + Size)};
+        SetItemIcon(Icon, IconId);
+        return Icon;
+    }
+
+    void SetItemIcon(TNTIconWidget* Icon, const int16_t IconId) {
+        if (!Icon || !Icon->image) return;
+        const bool Visible = IconId >= 0;
+        if (Visible && Icon->image->imageID != IconId) Icon->image->imageID = IconId;
+        if (Icon->isVisible != Visible) Icon->isVisible = Visible;
+    }
+
     TLBSWidget* CreateLabeledCheckbox(const ModHost* Host, const int16_t X, const int16_t Y, const wchar_t* Text,
                                       const int16_t TextWidth, bool* Value,
                                       const ClickFn OnChange, void* Argument) {
@@ -288,6 +319,47 @@ namespace WidgetKit {
         AddChild(Group, Checkbox);
         AddChild(Group, Label);
         return Group;
+    }
+
+    Tab CreateTab(const ModHost* Host, const int16_t X, const int16_t Y, const int16_t Width, const wchar_t* Text,
+                  const ClickFn OnClick, void* Argument) {
+        Tab Result;
+        TEWGraphicButtonWidget* Button = Widget::Create<TEWGraphicButtonWidget>(Host);
+        TEWLabel* Caption = Widget::Create<TEWLabel>(Host);
+        if (!Button || !Caption) return Result;
+        constexpr AtlasFrame Frames[] = {
+            {419, 308, 5, 24}, {424, 308, 10, 24}, {409, 308, 10, 24},
+            {445, 308, 5, 24}, {450, 308, 10, 24}, {435, 308, 10, 24},
+            {471, 308, 5, 24}, {476, 308, 10, 24}, {461, 308, 10, 24},
+        };
+        delete[] Button->imageData.atlasFrames;
+        Button->imageData.imageName = 1593835585;
+        Button->imageData.imageWidth = 512;
+        Button->imageData.imageHeight = 512;
+        Button->imageData.frameCount = static_cast<int16_t>(std::size(Frames));
+        Button->imageData.atlasFrames = new AtlasFrame[std::size(Frames)];
+        std::copy(std::begin(Frames), std::end(Frames), Button->imageData.atlasFrames);
+        constexpr int16_t Cap = 10;
+        Button->nineSliceInfo = {static_cast<uint16_t>(Width - 2 * Cap), 25, static_cast<uint16_t>(Width - Cap), 25, Cap, 0, Cap, 0};
+        Button->sliceCount = 3;
+        Button->drawMode = 4;
+        Button->rect = {X, Y, static_cast<int16_t>(X + Width), static_cast<int16_t>(Y + 25)};
+        SetOnClick(Button, OnClick, Argument);
+
+        Caption->rect = {0, 5, Width, 35};
+        Caption->textAlignment = 3;
+        Caption->pxPerLine = Width;
+        Caption->shadowColor = Color(255, 1, 61, 255);
+        Caption->SetText(Text ? Text : L"");
+        AddChild(Button, Caption);
+
+        Result.Button = Button;
+        Result.Caption = Caption;
+        return Result;
+    }
+
+    void SetTabActive(const Tab& Tab, const bool Active) {
+        if (Tab.Caption) Tab.Caption->textColor = Active ? Color(255, 255, 240, 180) : Color(255, 140, 150, 170);
     }
 
     TEWCustomPanelWidget* CreateGameWindow(const ModHost* Host, const WindowDesc& Desc) {
@@ -334,5 +406,57 @@ namespace WidgetKit {
             AddCloseButton(Host, Window, Desc.Width);
         }
         return Window;
+    }
+
+    namespace {
+        UiImage LoadUiImageBytes(const ModHost* Host, const void* Data, const uint32_t Size) {
+            UiImage Image;
+            if (Host && Host->LoadUiImage && Data && Size) {
+                Image.Id = Host->LoadUiImage(Data, Size, &Image.Width, &Image.Height);
+            }
+            return Image;
+        }
+    }
+
+    UiImage LoadUiImageResource(const ModHost* Host, const HMODULE Module, const char* ResourceName) {
+        HRSRC Resource = FindResourceA(Module, ResourceName, MAKEINTRESOURCEA(10));
+        HGLOBAL Loaded = Resource ? LoadResource(Module, Resource) : nullptr;
+        const void* Data = Loaded ? LockResource(Loaded) : nullptr;
+        return LoadUiImageBytes(Host, Data, Resource ? SizeofResource(Module, Resource) : 0);
+    }
+
+    UiImage LoadUiImageFile(const ModHost* Host, const char* Path) {
+        std::string Full = Path ? Path : "";
+        if (Full.size() < 2 || Full[1] != ':') {
+            char Exe[MAX_PATH]{};
+            GetModuleFileNameA(nullptr, Exe, MAX_PATH);
+            std::string Folder(Exe);
+            Full = Folder.substr(0, Folder.find_last_of("\/") + 1) + Full;
+        }
+        HANDLE File = CreateFileA(Full.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+        if (File == INVALID_HANDLE_VALUE) return {};
+        std::vector<uint8_t> Bytes(GetFileSize(File, nullptr));
+        DWORD Read = 0;
+        const bool Ok = ReadFile(File, Bytes.data(), static_cast<DWORD>(Bytes.size()), &Read, nullptr) && Read == Bytes.size();
+        CloseHandle(File);
+        return Ok ? LoadUiImageBytes(Host, Bytes.data(), static_cast<uint32_t>(Bytes.size())) : UiImage{};
+    }
+
+    TEWControlWidget* CreateImage(const ModHost* Host, const UiImage& Image, const int16_t X, const int16_t Y,
+                                  AtlasFrame Frame) {
+        if (!Image) return nullptr;
+        TEWControlWidget* Sprite = Widget::Create<TEWControlWidget>(Host);
+        if (!Sprite) return nullptr;
+        if (Frame.width == 0 || Frame.height == 0) {
+            Frame = {0, 0, static_cast<int16_t>(Image.Width), static_cast<int16_t>(Image.Height)};
+        }
+        delete[] Sprite->imageData.atlasFrames;
+        Sprite->imageData.imageName = Image.Id;
+        Sprite->imageData.imageWidth = static_cast<int16_t>(Image.Width);
+        Sprite->imageData.imageHeight = static_cast<int16_t>(Image.Height);
+        Sprite->imageData.frameCount = 1;
+        Sprite->imageData.atlasFrames = new AtlasFrame[1]{Frame};
+        Sprite->rect = {X, Y, static_cast<int16_t>(X + Frame.width), static_cast<int16_t>(Y + Frame.height)};
+        return Sprite;
     }
 }
