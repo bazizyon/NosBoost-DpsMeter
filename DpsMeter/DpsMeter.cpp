@@ -9,6 +9,7 @@
 #include "TEWCustomPanelWidget.h"
 #include "TEWGraphicButtonWidget.h"
 #include "CInfoPacket.h"
+#include "CMapPacket.h"
 #include "InPacket.h"
 #include "RBossPacket.h"
 #include "SuPacket.h"
@@ -80,6 +81,7 @@ namespace {
     struct Fight {
         std::vector<Hit> Hits;
         Clock::time_point LastHit;
+        bool BossMap = false;
     };
 
     struct PlayerInfo {
@@ -97,6 +99,7 @@ namespace {
     long OwnCharacterId = 0;
     std::unordered_map<long, PlayerInfo> Players;
     std::unordered_map<long, BossInfo> Bosses;
+    bool BossOnMap = false;
 
     Fight Current;
     bool HasCurrent = false;
@@ -135,6 +138,7 @@ namespace {
         double Seconds = 0;
         Clock::time_point End;
         bool Live = false;
+        bool BossFiltered = false;
     };
 
     struct BarRow {
@@ -174,7 +178,7 @@ namespace {
     TEWGraphicButtonWidget* OlderButton = nullptr;
     TEWGraphicButtonWidget* NewerButton = nullptr;
     TEWLabel* FooterLabel = nullptr;
-    std::wstring ShownBossLine, ShownFooter;
+    std::wstring ShownBossLine, ShownFooter, ShownHeaderName = L"Player";
     int LaidOutRows = -1;
     bool LaidOutBossLine = false;
     bool LaidOutSelf = false;
@@ -286,6 +290,7 @@ namespace {
         }
         if (ViewIndex == 0) Scroll = 0;
         Current = Fight{};
+        Current.BossMap = BossOnMap;
         Current.LastHit = Now;
         HasCurrent = true;
         EndCurrent = false;
@@ -299,13 +304,14 @@ namespace {
     FightView BuildView(const Fight& Source, const bool IsCurrent, const Clock::time_point Now) {
         FightView View;
         View.Live = IsCurrent && !EndCurrent && Now - Source.LastHit <= FightTimeout;
+        View.BossFiltered = Config.BossOnly && Source.BossMap;
         View.End = View.Live ? Now : Source.LastHit;
 
         std::unordered_map<long, PlayerTotal> Totals;
         std::unordered_map<long, std::unordered_map<int, SkillTotal>> Skills;
         Clock::time_point FightStart = View.End;
         for (const Hit& H : Source.Hits) {
-            if (Config.BossOnly && !Bosses.contains(H.Target)) continue;
+            if (View.BossFiltered && !Bosses.contains(H.Target)) continue;
             PlayerTotal& P = Totals[H.Player];
             if (P.Casts == 0) {
                 P.Id = H.Player;
@@ -386,8 +392,15 @@ namespace {
         return true;
     }
 
+    bool OnCMap(const Packet::CMapPacket&) {
+        BossOnMap = false;
+        return true;
+    }
+
     bool OnRBoss(const Packet::RBossPacket& Packet) {
         Bosses[Packet.entityID] = {Packet.HP, Packet.maxHP};
+        BossOnMap = true;
+        if (HasCurrent) Current.BossMap = true;
         return true;
     }
 
@@ -792,6 +805,7 @@ namespace {
         FooterLabel = AddLabel(Window, 0, 0, 10, 3);
 
         ShownBossLine.clear();
+        ShownHeaderName = L"Player";
         ShownFooter.clear();
         LaidOutRows = -1;
         ApplyLock();
@@ -839,6 +853,7 @@ namespace {
         const int SelfIndex = Self == LastView.Players.end() ? -1 : static_cast<int>(Self - LastView.Players.begin());
         LayOutWindow(VisibleRows, !Boss.empty(), SelfIndex >= 0);
         SetText(BossLineLabel, ShownBossLine, Boss);
+        SetText(HeaderName, ShownHeaderName, LastView.BossFiltered ? L"Player (boss)" : L"Player");
 
         wchar_t Buffer[128];
         const double TopDamage = LastView.Players.empty() ? 1.0 : static_cast<double>(LastView.Players.front().Damage);
@@ -981,6 +996,7 @@ extern "C" {
         LoadSettings();
         Packet::SubscribePacket(Host, &OnCInfo);
         Packet::SubscribePacket(Host, &OnIn);
+        Packet::SubscribePacket(Host, &OnCMap);
         Packet::SubscribePacket(Host, &OnRBoss);
         Packet::SubscribePacket(Host, &OnSu);
     }
