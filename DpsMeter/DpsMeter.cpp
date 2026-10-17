@@ -28,6 +28,8 @@ namespace {
     constexpr auto RefreshInterval = std::chrono::milliseconds(250);
     constexpr double MinActiveSeconds = 3.0;
     constexpr int MaxRows = 10;
+    constexpr int SelfSlot = MaxRows;
+    constexpr int Slots = MaxRows + 1;
     constexpr int MaxTooltipSkills = 8;
     constexpr size_t MaxHistory = 5;
 
@@ -43,6 +45,12 @@ namespace {
     constexpr int16_t ArrowHeight = 19;
     constexpr uint16_t SkinTop = 58;
     constexpr uint16_t SkinBottom = 14;
+    constexpr int16_t SelfGap = 8;
+    constexpr int16_t ColumnInset = 4;
+    constexpr int16_t ColumnGap = 6;
+    constexpr int16_t DpsWidth = 64;
+    constexpr int16_t TotalWidth = 58;
+    constexpr int16_t ShareWidth = 36;
 
     constexpr int32_t GaugeImageName = 1593835568;
     constexpr int32_t ArrowImageName = 1593835585;
@@ -101,6 +109,7 @@ namespace {
         int16_t Y = 200;
         bool Locked = false;
         bool BossOnly = false;
+        bool ShowTotal = true;
     } Config;
 
     struct SkillTotal {
@@ -136,23 +145,39 @@ namespace {
         std::wstring ShownValue;
     };
 
+    struct MeterRow {
+        TEWGuageWidget* Bar = nullptr;
+        TEWLabel* Name = nullptr;
+        TEWLabel* Dps = nullptr;
+        TEWLabel* Total = nullptr;
+        TEWLabel* Share = nullptr;
+        std::wstring ShownName, ShownDps, ShownTotal, ShownShare;
+    };
+
     TLBSWidget* AttachedRoot = nullptr;
+
+
 
     TEWCustomPanelWidget* Window = nullptr;
     TEWLabel* TitleLabel = nullptr;
     TLBSWidget* CloseButton = nullptr;
     TLBSWidget* BossToggle = nullptr;
+    TLBSWidget* TotalToggle = nullptr;
     TLBSWidget* LockToggle = nullptr;
     TEWLabel* BossLineLabel = nullptr;
     TEWLabel* HeaderName = nullptr;
-    TEWLabel* HeaderValue = nullptr;
-    BarRow Rows[MaxRows];
+    TEWLabel* HeaderDps = nullptr;
+    TEWLabel* HeaderTotal = nullptr;
+    TEWLabel* HeaderShare = nullptr;
+    MeterRow Rows[Slots];
+    TEWGuageWidget* SelfSeparator = nullptr;
     TEWGraphicButtonWidget* OlderButton = nullptr;
     TEWGraphicButtonWidget* NewerButton = nullptr;
     TEWLabel* FooterLabel = nullptr;
     std::wstring ShownBossLine, ShownFooter;
     int LaidOutRows = -1;
     bool LaidOutBossLine = false;
+    bool LaidOutSelf = false;
 
     TEWCustomPanelWidget* Tooltip = nullptr;
     TEWLabel* TooltipTitle = nullptr;
@@ -164,8 +189,9 @@ namespace {
     int LaidOutTooltipRows = -1;
 
     FightView LastView;
-    long RowPlayer[MaxRows] = {};
+    int SlotPlayer[Slots] = {};
     int HoveredRow = -1;
+    int Scroll = 0;
     Clock::time_point LastRefresh;
     bool HiddenForLoading = false;
 
@@ -240,6 +266,7 @@ namespace {
         Config.Y = static_cast<int16_t>(GetPrivateProfileIntA("DpsMeter", "Y", Config.Y, Path.c_str()));
         Config.Locked = GetPrivateProfileIntA("DpsMeter", "Locked", 0, Path.c_str()) != 0;
         Config.BossOnly = GetPrivateProfileIntA("DpsMeter", "BossOnly", 0, Path.c_str()) != 0;
+        Config.ShowTotal = GetPrivateProfileIntA("DpsMeter", "ShowTotal", 1, Path.c_str()) != 0;
     }
 
     void SaveSettings() {
@@ -248,6 +275,7 @@ namespace {
         WritePrivateProfileStringA("DpsMeter", "Y", std::to_string(Config.Y).c_str(), Path.c_str());
         WritePrivateProfileStringA("DpsMeter", "Locked", Config.Locked ? "1" : "0", Path.c_str());
         WritePrivateProfileStringA("DpsMeter", "BossOnly", Config.BossOnly ? "1" : "0", Path.c_str());
+        WritePrivateProfileStringA("DpsMeter", "ShowTotal", Config.ShowTotal ? "1" : "0", Path.c_str());
     }
 
     void StartNewFight(const Clock::time_point Now) {
@@ -256,6 +284,7 @@ namespace {
             if (History.size() > MaxHistory) History.pop_back();
             if (ViewIndex > 0) ViewIndex = std::min(ViewIndex + 1, History.size());
         }
+        if (ViewIndex == 0) Scroll = 0;
         Current = Fight{};
         Current.LastHit = Now;
         HasCurrent = true;
@@ -473,6 +502,60 @@ namespace {
         SetText(Row.Value, Row.ShownValue, Value);
     }
 
+    struct ColumnLayout {
+        int16_t NameWidth;
+        int16_t DpsX;
+        int16_t TotalX;
+        int16_t ShareX;
+    };
+
+    ColumnLayout MeterColumns(const int16_t Width) {
+        ColumnLayout Columns{};
+        Columns.ShareX = static_cast<int16_t>(Pad + Width - ColumnInset - ShareWidth);
+        Columns.TotalX = static_cast<int16_t>(Columns.ShareX - ColumnGap - TotalWidth);
+        Columns.DpsX = static_cast<int16_t>((Config.ShowTotal ? Columns.TotalX : Columns.ShareX) - ColumnGap - DpsWidth);
+        Columns.NameWidth = static_cast<int16_t>(Columns.DpsX - ColumnGap - Pad - ColumnInset);
+        return Columns;
+    }
+
+    void PlaceLabel(TEWLabel* Label, const int16_t X, const int16_t TextY, const int16_t Width) {
+        if (!Label) return;
+        Place(Label, X, static_cast<int16_t>(TextY + TextNudge), Width, 30);
+        Label->pxPerLine = Width;
+    }
+
+    void PlaceColumns(TEWLabel* Name, TEWLabel* Dps, TEWLabel* Total, TEWLabel* Share, const int16_t TextY,
+                      const int16_t Width) {
+        const ColumnLayout Columns = MeterColumns(Width);
+        PlaceLabel(Name, Pad + ColumnInset, TextY, Columns.NameWidth);
+        PlaceLabel(Dps, Columns.DpsX, TextY, DpsWidth);
+        PlaceLabel(Total, Columns.TotalX, TextY, TotalWidth);
+        PlaceLabel(Share, Columns.ShareX, TextY, ShareWidth);
+    }
+
+    MeterRow AddMeterRow(TLBSWidget* Parent) {
+        MeterRow Row;
+        Row.Bar = AddBar(Parent);
+        Row.Name = AddLabel(Parent, 0, 0, 10, 1);
+        Row.Dps = AddLabel(Parent, 0, 0, 10, 2);
+        Row.Total = AddLabel(Parent, 0, 0, 10, 2);
+        Row.Share = AddLabel(Parent, 0, 0, 10, 2);
+        return Row;
+    }
+
+    void PlaceMeterRow(MeterRow& Row, const int16_t Y, const int16_t Width) {
+        Place(Row.Bar, Pad, Y, Width, BarHeight);
+        PlaceColumns(Row.Name, Row.Dps, Row.Total, Row.Share, static_cast<int16_t>(Y + (BarHeight - 12) / 2), Width);
+    }
+
+    void ShowMeterRow(MeterRow& Row, const bool Visible) {
+        Show(Row.Bar, Visible);
+        Show(Row.Name, Visible);
+        Show(Row.Dps, Visible);
+        Show(Row.Total, Visible && Config.ShowTotal);
+        Show(Row.Share, Visible);
+    }
+
     void SetPanelHeight(TEWCustomPanelWidget* Panel, uint16_t Height) {
         Height = std::max<uint16_t>(Height, SkinTop + SkinBottom + 1);
         Panel->rect.bottom = static_cast<int16_t>(Panel->rect.top + Height);
@@ -520,11 +603,13 @@ namespace {
 
     void __cdecl OnOlder(void*) {
         ViewIndex = std::min(ViewIndex + 1, History.size());
+        Scroll = 0;
         RequestRefresh();
     }
 
     void __cdecl OnNewer(void*) {
         if (ViewIndex > 0) ViewIndex--;
+        Scroll = 0;
         RequestRefresh();
     }
 
@@ -538,6 +623,7 @@ namespace {
     constexpr int16_t ToggleWidth = 15 + 4 + ToggleTextWidth;
     constexpr int16_t LockX = WindowWidth - 33 - ToggleWidth;
     constexpr int16_t BossX = LockX - 8 - ToggleWidth;
+    constexpr int16_t TotalX = BossX - 8 - ToggleWidth;
     const Color HeaderColor(255, 160, 160, 160);
 
     void ApplyLock() {
@@ -545,7 +631,6 @@ namespace {
         const bool Chrome = !Config.Locked;
         Show(TitleLabel, Chrome);
         Show(CloseButton, Chrome);
-        Show(BossToggle, Chrome);
         Show(OlderButton, Chrome);
         Show(NewerButton, Chrome);
         Show(FooterLabel, Chrome);
@@ -555,20 +640,32 @@ namespace {
         LaidOutRows = -1;
     }
 
+    void __cdecl OnShowTotalChanged(void*) {
+        LaidOutRows = -1;
+        SaveSettings();
+        RequestRefresh();
+    }
+
     void __cdecl OnLockChanged(void*) {
         ApplyLock();
         SaveSettings();
         RequestRefresh();
     }
 
-    void SyncLockToggle() {
-        if (!LockToggle || !Window || !AttachedRoot) return;
-        Show(LockToggle, Window->isVisible);
-        const int16_t X = static_cast<int16_t>(Window->rect.left + LockX);
+    void SyncToggle(TLBSWidget* Toggle, const int16_t OffsetX) {
+        if (!Toggle || !Window || !AttachedRoot) return;
+        Show(Toggle, Window->isVisible);
+        const int16_t X = static_cast<int16_t>(Window->rect.left + OffsetX);
         const int16_t Y = static_cast<int16_t>(Window->rect.top + ToggleY);
-        if (LockToggle->rect.left != X || LockToggle->rect.top != Y) Place(LockToggle, X, Y, ToggleWidth, 15);
+        if (Toggle->rect.left != X || Toggle->rect.top != Y) Place(Toggle, X, Y, ToggleWidth, 15);
         const TLBSWidgetList* Siblings = AttachedRoot->childrenList;
-        if (Siblings->index_of(LockToggle) < Siblings->index_of(Window)) LockToggle->BubbleUp();
+        if (Siblings->index_of(Toggle) < Siblings->index_of(Window)) Toggle->BubbleUp();
+    }
+
+    void SyncToggles() {
+        SyncToggle(TotalToggle, TotalX);
+        SyncToggle(BossToggle, BossX);
+        SyncToggle(LockToggle, LockX);
     }
 
     void PlaceHeaders(TEWLabel* Name, TEWLabel* Value, const int16_t Y, const int16_t Width) {
@@ -584,10 +681,11 @@ namespace {
         return Label;
     }
 
-    void LayOutWindow(const int VisibleRows, const bool HasBossLine) {
-        if (VisibleRows == LaidOutRows && HasBossLine == LaidOutBossLine) return;
+    void LayOutWindow(const int VisibleRows, const bool HasBossLine, const bool HasSelf) {
+        if (VisibleRows == LaidOutRows && HasBossLine == LaidOutBossLine && HasSelf == LaidOutSelf) return;
         LaidOutRows = VisibleRows;
         LaidOutBossLine = HasBossLine;
+        LaidOutSelf = HasSelf;
 
         const int16_t Width = WindowWidth - 2 * Pad;
         int16_t Y = ContentTop;
@@ -597,16 +695,26 @@ namespace {
             Y += LineHeight;
         }
         Show(HeaderName, VisibleRows > 0);
-        Show(HeaderValue, VisibleRows > 0);
+        Show(HeaderDps, VisibleRows > 0);
+        Show(HeaderTotal, VisibleRows > 0 && Config.ShowTotal);
+        Show(HeaderShare, VisibleRows > 0);
         if (VisibleRows > 0) {
-            PlaceHeaders(HeaderName, HeaderValue, Y, Width);
+            PlaceColumns(HeaderName, HeaderDps, HeaderTotal, HeaderShare, Y, Width);
             Y += LineHeight;
         }
         for (int i = 0; i < MaxRows; i++) {
-            PlaceBarRow(Rows[i], static_cast<int16_t>(Y + i * RowHeight), Width);
-            ShowBarRow(Rows[i], i < VisibleRows);
+            PlaceMeterRow(Rows[i], static_cast<int16_t>(Y + i * RowHeight), Width);
+            ShowMeterRow(Rows[i], i < VisibleRows);
         }
         Y += static_cast<int16_t>(VisibleRows * RowHeight);
+        Show(SelfSeparator, HasSelf);
+        ShowMeterRow(Rows[SelfSlot], HasSelf);
+        if (HasSelf) {
+            Place(SelfSeparator, Pad, static_cast<int16_t>(Y + (SelfGap - 2) / 2 - 2), Width, 2);
+            Y += SelfGap;
+            PlaceMeterRow(Rows[SelfSlot], Y, Width);
+            Y += RowHeight;
+        }
         if (!Config.Locked) {
             Y += 4;
             Place(OlderButton, Pad, Y, ArrowWidth, ArrowHeight);
@@ -666,15 +774,19 @@ namespace {
         TitleLabel = Window->childrenList->count > 0 ? static_cast<TEWLabel*>(Window->childrenList->list[0]) : nullptr;
         CloseButton = Window->childrenList->count > 1 ? Window->childrenList->list[1] : nullptr;
 
-        BossToggle = WidgetKit::CreateLabeledCheckbox(CachedHost, BossX, ToggleY, L"Boss", ToggleTextWidth,
-                                                      &Config.BossOnly, &OnBossOnlyChanged);
-        Attach(Window, BossToggle);
 
         BossLineLabel = AddLabel(Window, Pad, ContentTop, WindowWidth - 2 * Pad, 1);
         if (BossLineLabel) BossLineLabel->textColor = Color(255, 255, 120, 120);
-        HeaderName = AddHeader(Window, L"Player", (WindowWidth - 2 * Pad) / 2, 1);
-        HeaderValue = AddHeader(Window, L"DPS | Share", (WindowWidth - 2 * Pad) / 2, 2);
-        for (auto& Row : Rows) Row = AddBarRow(Window);
+        HeaderName = AddHeader(Window, L"Player", 10, 1);
+        HeaderDps = AddHeader(Window, L"DPS", 10, 2);
+        HeaderTotal = AddHeader(Window, L"Total", 10, 2);
+        HeaderShare = AddHeader(Window, L"Share", 10, 2);
+        for (auto& Row : Rows) Row = AddMeterRow(Window);
+        SelfSeparator = AddBar(Window);
+        if (SelfSeparator) {
+            SelfSeparator->fillPercent = 1.0f;
+            SelfSeparator->gaugeColor = Color(255, 120, 120, 120);
+        }
         OlderButton = AddArrowButton(Window, false, &OnOlder);
         NewerButton = AddArrowButton(Window, true, &OnNewer);
         FooterLabel = AddLabel(Window, 0, 0, 10, 3);
@@ -689,17 +801,27 @@ namespace {
         LockToggle = WidgetKit::CreateLabeledCheckbox(CachedHost, 0, 0, L"Lock", ToggleTextWidth,
                                                       &Config.Locked, &OnLockChanged);
         Attach(Root, LockToggle);
-        SyncLockToggle();
+        BossToggle = WidgetKit::CreateLabeledCheckbox(CachedHost, 0, 0, L"Boss", ToggleTextWidth,
+                                                      &Config.BossOnly, &OnBossOnlyChanged);
+        Attach(Root, BossToggle);
+        TotalToggle = WidgetKit::CreateLabeledCheckbox(CachedHost, 0, 0, L"Total", ToggleTextWidth,
+                                                       &Config.ShowTotal, &OnShowTotalChanged);
+        Attach(Root, TotalToggle);
+        SyncToggles();
         CreateTooltip(Root);
     }
 
     void DestroyWidgets() {
         Detach(Tooltip);
         Detach(LockToggle);
+        Detach(BossToggle);
+        Detach(TotalToggle);
         Detach(Window);
         Window = nullptr;
         Tooltip = nullptr;
         LockToggle = nullptr;
+        BossToggle = nullptr;
+        TotalToggle = nullptr;
         AttachedRoot = nullptr;
         HoveredRow = -1;
     }
@@ -709,27 +831,47 @@ namespace {
         LastView = Viewed ? BuildView(*Viewed, ViewIndex == 0, Now) : FightView{};
 
         const std::wstring Boss = BossLine(Now);
-        const int VisibleRows = std::min(MaxRows, static_cast<int>(LastView.Players.size()));
-        LayOutWindow(VisibleRows, !Boss.empty());
+        const int PlayerCount = static_cast<int>(LastView.Players.size());
+        const int VisibleRows = std::min(MaxRows, PlayerCount);
+        Scroll = std::clamp(Scroll, 0, std::max(0, PlayerCount - MaxRows));
+        const auto Self = std::find_if(LastView.Players.begin(), LastView.Players.end(),
+                                       [](const PlayerTotal& P) { return P.Id == OwnCharacterId; });
+        const int SelfIndex = Self == LastView.Players.end() ? -1 : static_cast<int>(Self - LastView.Players.begin());
+        LayOutWindow(VisibleRows, !Boss.empty(), SelfIndex >= 0);
         SetText(BossLineLabel, ShownBossLine, Boss);
 
         wchar_t Buffer[128];
         const double TopDamage = LastView.Players.empty() ? 1.0 : static_cast<double>(LastView.Players.front().Damage);
-        for (int i = 0; i < VisibleRows; i++) {
-            const PlayerTotal& P = LastView.Players[i];
-            RowPlayer[i] = P.Id;
-            std::swprintf(Buffer, std::size(Buffer), L"%ls/s | %lld%%",FormatAmount(PlayerDps(P, LastView)).c_str(),
-                          P.Damage * 100 / std::max(1LL, LastView.Total));
-            UpdateBarRow(Rows[i], std::to_wstring(i + 1) + L". " + NameOf(P.Id), Buffer,
-                         static_cast<float>(P.Damage / TopDamage), BarColor(P.Id));
-        }
+        const auto UpdateSlot = [&](const int Slot, const int Index) {
+            const PlayerTotal& P = LastView.Players[Index];
+            MeterRow& Row = Rows[Slot];
+            SlotPlayer[Slot] = Index;
+            if (Row.Bar) {
+                Row.Bar->fillPercent = std::clamp(static_cast<float>(P.Damage / TopDamage), 0.0f, 1.0f);
+                Row.Bar->gaugeColor = BarColor(P.Id);
+            }
+            std::swprintf(Buffer, std::size(Buffer), L"%lld%%", P.Damage * 100 / std::max(1LL, LastView.Total));
+            SetText(Row.Name, Row.ShownName, std::to_wstring(Index + 1) + L". " + NameOf(P.Id));
+            SetText(Row.Dps, Row.ShownDps, FormatAmount(PlayerDps(P, LastView)) + L"/s");
+            SetText(Row.Total, Row.ShownTotal, FormatAmount(static_cast<double>(P.Damage)));
+            SetText(Row.Share, Row.ShownShare, Buffer);
+        };
+        for (int i = 0; i < Slots; i++) SlotPlayer[i] = -1;
+        for (int i = 0; i < VisibleRows; i++) UpdateSlot(i, Scroll + i);
+        if (SelfIndex >= 0) UpdateSlot(SelfSlot, SelfIndex);
 
+        std::wstring Footer;
         if (ViewIndex == 0) {
-            SetText(FooterLabel, ShownFooter, L"Live");
+            Footer = L"Live";
         } else {
             std::swprintf(Buffer, std::size(Buffer), L"%zu fight%ls ago", ViewIndex, ViewIndex == 1 ? L"" : L"s");
-            SetText(FooterLabel, ShownFooter, Buffer);
+            Footer = Buffer;
         }
+        if (PlayerCount > MaxRows) {
+            std::swprintf(Buffer, std::size(Buffer), L" | %d-%d of %d", Scroll + 1, Scroll + VisibleRows, PlayerCount);
+            Footer += Buffer;
+        }
+        SetText(FooterLabel, ShownFooter, Footer);
         Show(OlderButton, !Config.Locked && ViewIndex < History.size());
         Show(NewerButton, !Config.Locked && ViewIndex > 0);
 
@@ -738,15 +880,17 @@ namespace {
             Config.Y = Window->rect.top;
             SaveSettings();
         }
+
     }
 
     void RefreshTooltip() {
         if (!Tooltip) return;
-        if (HoveredRow < 0 || HoveredRow >= static_cast<int>(LastView.Players.size())) {
+        const int Index = HoveredRow < 0 ? -1 : SlotPlayer[HoveredRow];
+        if (Index < 0 || Index >= static_cast<int>(LastView.Players.size())) {
             if (Tooltip->isVisible) Tooltip->ToggleVisibilityRecursively(false);
             return;
         }
-        const PlayerTotal& P = LastView.Players[HoveredRow];
+        const PlayerTotal& P = LastView.Players[Index];
         const auto Info = Players.find(P.Id);
         const PlayerClass Class = Info == Players.end() ? PlayerClass::Adventurer : Info->second.Class;
 
@@ -779,9 +923,12 @@ namespace {
         const POINT Bar = AbsoluteTopLeft(Rows[HoveredRow].Bar);
         const int16_t Height = static_cast<int16_t>(Tooltip->rect.bottom - Tooltip->rect.top);
         const int ScreenRight = AttachedRoot ? AttachedRoot->rect.right : 1920;
+        const int ScreenBottom = AttachedRoot ? AttachedRoot->rect.bottom : 1080;
         int X = Meter.x + WindowWidth + 4;
         if (X + TooltipWidth > ScreenRight) X = Meter.x - TooltipWidth - 4;
-        Place(Tooltip, static_cast<int16_t>(X), static_cast<int16_t>(std::max(0L, Bar.y - ContentTop)), TooltipWidth, Height);
+        X = std::clamp(X, 0, std::max(0, ScreenRight - TooltipWidth));
+        const int Y = std::clamp(static_cast<int>(Bar.y) - ContentTop, 0, std::max(0, ScreenBottom - Height));
+        Place(Tooltip, static_cast<int16_t>(X), static_cast<int16_t>(Y), TooltipWidth, Height);
         if (WasHidden) Tooltip->BubbleUp();
     }
 
@@ -789,7 +936,7 @@ namespace {
         int Hovered = -1;
         POINT Cursor;
         if (Window && Window->isVisible && CursorInGame(Cursor)) {
-            for (int i = 0; i < LaidOutRows; i++) {
+            for (int i = 0; i < Slots; i++) {
                 const TEWGuageWidget* Bar = Rows[i].Bar;
                 if (!Bar || !Bar->isVisible) continue;
                 const POINT TopLeft = AbsoluteTopLeft(Bar);
@@ -804,6 +951,20 @@ namespace {
             HoveredRow = Hovered;
             RefreshTooltip();
         }
+        if (Window && Config.Locked && Window->isInteractable != (Hovered >= 0)) Window->isInteractable = Hovered >= 0;
+    }
+
+    void ScrollRows(const TickContext& Context) {
+        const POINT TopLeft = AbsoluteTopLeft(Window);
+        if (Context.mouseX < TopLeft.x || Context.mouseX >= TopLeft.x + (Window->rect.right - Window->rect.left)
+            || Context.mouseY < TopLeft.y || Context.mouseY >= TopLeft.y + (Window->rect.bottom - Window->rect.top)) {
+            return;
+        }
+        const int MaxScroll = std::max(0, static_cast<int>(LastView.Players.size()) - MaxRows);
+        const int NewScroll = std::clamp(Scroll + (Context.mouseWheel > 0 ? -1 : 1), 0, MaxScroll);
+        if (NewScroll == Scroll) return;
+        Scroll = NewScroll;
+        RequestRefresh();
     }
 }
 
@@ -845,6 +1006,8 @@ extern "C" {
             }
             Show(Tooltip, false);
             Show(LockToggle, false);
+            Show(BossToggle, false);
+            Show(TotalToggle, false);
             HoveredRow = -1;
             EndCurrent = HasCurrent;
             return;
@@ -854,6 +1017,8 @@ extern "C" {
             Window = nullptr;
             Tooltip = nullptr;
             LockToggle = nullptr;
+            BossToggle = nullptr;
+            TotalToggle = nullptr;
             AttachedRoot = Root;
             CreateMeterWindow(Root);
         }
@@ -867,7 +1032,7 @@ extern "C" {
             HiddenForLoading = false;
             Window->isVisible = true;
         }
-        SyncLockToggle();
+        SyncToggles();
         if (!Window->isVisible) {
             if (Tooltip && Tooltip->isVisible) Tooltip->ToggleVisibilityRecursively(false);
             HoveredRow = -1;
@@ -875,6 +1040,7 @@ extern "C" {
         }
 
         UpdateHover();
+        if (tickContext.mouseWheel != 0) ScrollRows(tickContext);
         const auto Now = Clock::now();
         if (Now - LastRefresh < RefreshInterval) return;
         LastRefresh = Now;
