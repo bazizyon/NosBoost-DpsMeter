@@ -11,6 +11,7 @@
 #include "TNTIconWidget.h"
 #include "CInfoPacket.h"
 #include "CMapPacket.h"
+#include "NcifPacket.h"
 #include "InPacket.h"
 #include "RBossPacket.h"
 #include "SuPacket.h"
@@ -18,6 +19,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstring>
 #include <cwchar>
 #include <deque>
 #include <string>
@@ -121,6 +123,7 @@ namespace {
     std::unordered_map<long, PlayerInfo> Players;
     std::unordered_map<long, BossInfo> Bosses;
     bool BossOnMap = false;
+    std::unordered_map<long, std::unordered_map<long, long long>> MobDamage;
 
     Fight Current;
     bool HasCurrent = false;
@@ -181,6 +184,45 @@ namespace {
 
     TLBSWidget* AttachedRoot = nullptr;
 
+    constexpr char TargetClassName[] = "TNTMonsterSummaryInfoWidget";
+    constexpr ptrdiff_t VmtClassName = -0x2C;
+    constexpr int TargetMonster = 3;
+    constexpr auto TargetRescanInterval = std::chrono::milliseconds(500);
+    constexpr int MobPanelRows = 3;
+    constexpr int MaxMobRows = MobPanelRows;
+    constexpr int MobSelfSlot = MaxMobRows;
+    constexpr int MobSlots = MaxMobRows + 1;
+    constexpr int16_t MobPanelWidth = 190;
+    constexpr int16_t MobPanelGap = 4;
+    constexpr int16_t MobTitleHeight = 16;
+    constexpr int16_t MobRowHeight = 16;
+    constexpr int16_t MobBarHeight = 14;
+    constexpr int16_t MobSelfGap = 5;
+    constexpr int16_t MobTotalWidth = 56;
+
+    struct MobRow {
+        TEWGuageWidget* Bar = nullptr;
+        TEWLabel* Name = nullptr;
+        TEWLabel* Total = nullptr;
+        std::wstring ShownName, ShownTotal;
+    };
+
+    TLBSWidget* TargetWidget = nullptr;
+    uintptr_t TargetVTable = 0;
+    Clock::time_point LastTargetScan;
+    int SelectedType = 0;
+    long SelectedId = 0;
+
+    TLBSWidget* MobPanel = nullptr;
+    TEWLabel* MobTitle = nullptr;
+    std::wstring ShownMobTitle;
+    MobRow MobRows[MobSlots];
+    TEWGuageWidget* MobSeparator = nullptr;
+    int LaidOutMobRows = -1;
+    bool LaidOutMobSelf = false;
+    long ShownMobId = 0;
+    int MobScroll = 0;
+    Clock::time_point LastMobRefresh;
 
 
     TEWCustomPanelWidget* Window = nullptr;
@@ -416,6 +458,15 @@ namespace {
 
     bool OnCMap(const Packet::CMapPacket&) {
         BossOnMap = false;
+        MobDamage.clear();
+        SelectedType = 0;
+        SelectedId = 0;
+        return true;
+    }
+
+    bool OnNcif(const Packet::NcifPacket& Packet) {
+        SelectedType = Packet.entityType;
+        SelectedId = Packet.entityID;
         return true;
     }
 
@@ -441,6 +492,7 @@ namespace {
         const bool Crit = Packet.hitMode == HitMode::CriticalAttack || Packet.hitMode == HitMode::UnknownCriticalAttack;
         Current.Hits.push_back({Packet.userEntityID, Packet.targetEntityID, Packet.skillVNum,
                                 std::max(0, Packet.damage), Crit, Miss, Now});
+        if (!Miss && Packet.damage > 0) MobDamage[Packet.targetEntityID][Packet.userEntityID] += Packet.damage;
         return true;
     }
 
@@ -881,6 +933,9 @@ namespace {
     }
 
     void DestroyWidgets() {
+        Detach(MobPanel);
+        MobPanel = nullptr;
+        TargetWidget = nullptr;
         Detach(Tooltip);
         Detach(LockToggle);
         Detach(BossToggle);
@@ -1039,6 +1094,202 @@ namespace {
         Scroll = NewScroll;
         RequestRefresh();
     }
+
+
+    bool SafeCopy(void* Out, const uintptr_t Address, const size_t Size) {
+        __try {
+            std::memcpy(Out, reinterpret_cast<const void*>(Address), Size);
+            return true;
+        } __except (GetExceptionCode() == EXCEPTION_ACCESS_VIOLATION ? EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH) {
+            return false;
+        }
+    }
+
+    template <typename T>
+    bool SafeRead(const uintptr_t Address, T& Out) {
+        return SafeCopy(&Out, Address, sizeof(T));
+    }
+
+    bool IsTargetClass(const TLBSWidget* Widget) {
+        uintptr_t VTable = 0, NamePtr = 0;
+        uint8_t Length = 0;
+        if (!SafeRead(reinterpret_cast<uintptr_t>(Widget), VTable)) return false;
+        if (!SafeRead(VTable + VmtClassName, NamePtr) || !SafeRead(NamePtr, Length)) return false;
+        char Text[sizeof(TargetClassName)];
+        return Length == sizeof(TargetClassName) - 1 && SafeCopy(Text, NamePtr + 1, Length)
+            && std::memcmp(Text, TargetClassName, Length) == 0;
+    }
+
+    TLBSWidget* FindTarget(TLBSWidget* Root, const Clock::time_point Now) {
+        const TLBSWidgetList* Children = Root->childrenList;
+        if (TargetWidget && Children->index_of(TargetWidget) >= 0) return TargetWidget;
+        TargetWidget = nullptr;
+        if (!TargetVTable && Now - LastTargetScan < TargetRescanInterval) return nullptr;
+        LastTargetScan = Now;
+        for (uint32_t i = 0; i < Children->count; i++) {
+            TLBSWidget* Child = Children->list[i];
+            if (!Child) continue;
+            if (TargetVTable ? Child->vTable == TargetVTable : IsTargetClass(Child)) {
+                TargetVTable = Child->vTable;
+                TargetWidget = Child;
+                break;
+            }
+        }
+        return TargetWidget;
+    }
+
+    bool CursorOver(const TLBSWidget* Widget, const int16_t Width, const int16_t Height) {
+        POINT Cursor;
+        if (!Widget || !CursorInGame(Cursor)) return false;
+        const POINT At = AbsoluteTopLeft(Widget);
+        return Cursor.x >= At.x && Cursor.x < At.x + Width && Cursor.y >= At.y && Cursor.y < At.y + Height;
+    }
+
+    MobRow AddMobRow(TLBSWidget* Parent) {
+        MobRow Row;
+        Row.Bar = AddBar(Parent);
+        Row.Name = AddLabel(Parent, 0, 0, 10, 1);
+        Row.Total = AddLabel(Parent, 0, 0, 10, 2);
+        return Row;
+    }
+
+    void PlaceMobRow(MobRow& Row, const int16_t Y) {
+        const auto TextY = static_cast<int16_t>(Y + (MobBarHeight - 12) / 2);
+        Place(Row.Bar, 0, Y, MobPanelWidth, MobBarHeight);
+        PlaceLabel(Row.Name, 4, TextY, MobPanelWidth - MobTotalWidth - 8);
+        PlaceLabel(Row.Total, MobPanelWidth - MobTotalWidth - 4, TextY, MobTotalWidth);
+    }
+
+    void ShowMobRow(MobRow& Row, const bool Visible) {
+        Show(Row.Bar, Visible);
+        Show(Row.Name, Visible);
+        Show(Row.Total, Visible);
+    }
+
+    void CreateMobPanel(TLBSWidget* Root) {
+        MobPanel = Widget::Create<TLBSWidget>(CachedHost);
+        if (!MobPanel) return;
+        Place(MobPanel, 0, 0, MobPanelWidth, MobTitleHeight);
+        MobPanel->isInteractable = false;
+        MobTitle = AddLabel(MobPanel, 0, 0, MobPanelWidth, 1);
+        if (MobTitle) {
+            PlaceLabel(MobTitle, 2, static_cast<int16_t>((MobBarHeight - 12) / 2), MobPanelWidth - 4);
+            MobTitle->shadowStyle = 255;
+            MobTitle->shadowColor = Color(255, 0, 0, 0);
+            MobTitle->textColor = Color(255, 255, 215, 0);
+        }
+        for (auto& Row : MobRows) Row = AddMobRow(MobPanel);
+        MobSeparator = AddBar(MobPanel);
+        if (MobSeparator) {
+            MobSeparator->fillPercent = 1.0f;
+            MobSeparator->gaugeColor = Color(255, 120, 120, 120);
+        }
+        ShownMobTitle.clear();
+        LaidOutMobRows = -1;
+        ShownMobId = 0;
+        MobPanel->isVisible = false;
+        Attach(Root, MobPanel);
+    }
+
+    void HideMobPanel() {
+        if (!MobPanel) return;
+        Show(MobPanel, false);
+        if (MobPanel->isInteractable) MobPanel->isInteractable = false;
+    }
+
+    void LayOutMobPanel(const int Rows, const bool HasSelf) {
+        if (Rows == LaidOutMobRows && HasSelf == LaidOutMobSelf) return;
+        LaidOutMobRows = Rows;
+        LaidOutMobSelf = HasSelf;
+        int16_t Y = MobTitleHeight;
+        for (int i = 0; i < MaxMobRows; i++) {
+            PlaceMobRow(MobRows[i], static_cast<int16_t>(Y + i * MobRowHeight));
+            ShowMobRow(MobRows[i], i < Rows);
+        }
+        Y = static_cast<int16_t>(Y + Rows * MobRowHeight);
+        Show(MobSeparator, HasSelf);
+        ShowMobRow(MobRows[MobSelfSlot], HasSelf);
+        if (HasSelf) {
+            Place(MobSeparator, 0, Y, MobPanelWidth, 2);
+            Y = static_cast<int16_t>(Y + MobSelfGap);
+            PlaceMobRow(MobRows[MobSelfSlot], Y);
+            Y = static_cast<int16_t>(Y + MobRowHeight);
+        }
+        MobPanel->rect.bottom = static_cast<int16_t>(MobPanel->rect.top + Y);
+    }
+
+    void RefreshMobPanel(const std::unordered_map<long, long long>& Damage) {
+        std::vector<std::pair<long, long long>> Dealt(Damage.begin(), Damage.end());
+        std::sort(Dealt.begin(), Dealt.end(), [](const auto& A, const auto& B) { return A.second > B.second; });
+
+        const int Count = static_cast<int>(Dealt.size());
+        const int Rows = std::min(MobPanelRows, Count);
+        MobScroll = std::clamp(MobScroll, 0, std::max(0, Count - MobPanelRows));
+        const auto Self = std::find_if(Dealt.begin(), Dealt.end(), [](const auto& Entry) { return Entry.first == OwnCharacterId; });
+        const int SelfIndex = Self == Dealt.end() ? -1 : static_cast<int>(Self - Dealt.begin());
+        const bool HasSelf = SelfIndex >= 0 && (SelfIndex < MobScroll || SelfIndex >= MobScroll + Rows);
+        LayOutMobPanel(Rows, HasSelf);
+
+        const double Top = static_cast<double>(std::max(1LL, Dealt.front().second));
+        const auto Update = [&](const int Slot, const int Index) {
+            const auto& [Player, Total] = Dealt[Index];
+            MobRow& Row = MobRows[Slot];
+            if (Row.Bar) {
+                Row.Bar->fillPercent = std::clamp(static_cast<float>(Total / Top), 0.0f, 1.0f);
+                Row.Bar->gaugeColor = BarColor(Player);
+            }
+            SetText(Row.Name, Row.ShownName, std::to_wstring(Index + 1) + L". " + NameOf(Player));
+            SetText(Row.Total, Row.ShownTotal, FormatAmount(static_cast<double>(Total)));
+        };
+        for (int i = 0; i < Rows; i++) Update(i, MobScroll + i);
+        if (HasSelf) Update(MobSelfSlot, SelfIndex);
+
+        std::wstring Title = L"Damage";
+        if (Count > MobPanelRows) {
+            wchar_t Buffer[48];
+            std::swprintf(Buffer, std::size(Buffer), L"  %d-%d of %d", MobScroll + 1, MobScroll + Rows, Count);
+            Title += Buffer;
+        }
+        SetText(MobTitle, ShownMobTitle, Title);
+    }
+
+    void SyncMobPanel(TLBSWidget* Root, const TickContext& Context, const Clock::time_point Now) {
+        if (!MobPanel) return;
+        TLBSWidget* Target = FindTarget(Root, Now);
+        const bool Targeted = Target && Target->isVisible && SelectedType == TargetMonster;
+        const auto Damage = Targeted ? MobDamage.find(SelectedId) : MobDamage.end();
+        if (Damage == MobDamage.end() || Damage->second.empty()) {
+            HideMobPanel();
+            return;
+        }
+        if (SelectedId != ShownMobId) {
+            ShownMobId = SelectedId;
+            MobScroll = 0;
+            LastMobRefresh = {};
+        }
+
+        const POINT At = AbsoluteTopLeft(Target);
+        const auto X = static_cast<int16_t>(std::max(0L, At.x - MobPanelGap - MobPanelWidth));
+        const auto Y = static_cast<int16_t>(At.y);
+        if (MobPanel->rect.left != X || MobPanel->rect.top != Y) {
+            Place(MobPanel, X, Y, MobPanelWidth, static_cast<int16_t>(MobPanel->rect.bottom - MobPanel->rect.top));
+        }
+
+        const bool Hovered = MobPanel->isVisible
+            && CursorOver(MobPanel, MobPanelWidth, static_cast<int16_t>(MobPanel->rect.bottom - MobPanel->rect.top));
+        if (MobPanel->isInteractable != Hovered) MobPanel->isInteractable = Hovered;
+        if (Hovered && Context.mouseWheel != 0) {
+            MobScroll += Context.mouseWheel > 0 ? -1 : 1;
+            LastMobRefresh = {};
+        }
+        if (Now - LastMobRefresh >= RefreshInterval) {
+            LastMobRefresh = Now;
+            RefreshMobPanel(Damage->second);
+        }
+        if (!MobPanel->isVisible) Show(MobPanel, true);
+        const TLBSWidgetList* Siblings = Root->childrenList;
+        if (Siblings->index_of(MobPanel) < Siblings->index_of(Target)) MobPanel->BubbleUp();
+    }
 }
 
 extern "C" {
@@ -1055,6 +1306,7 @@ extern "C" {
         Packet::SubscribePacket(Host, &OnCInfo);
         Packet::SubscribePacket(Host, &OnIn);
         Packet::SubscribePacket(Host, &OnCMap);
+        Packet::SubscribeSentPacket(Host, &OnNcif);
         Packet::SubscribePacket(Host, &OnRBoss);
         Packet::SubscribePacket(Host, &OnSu);
     }
@@ -1082,6 +1334,7 @@ extern "C" {
             Show(LockToggle, false);
             Show(BossToggle, false);
             Show(TotalToggle, false);
+            HideMobPanel();
             HoveredRow = -1;
             EndCurrent = HasCurrent;
             return;
@@ -1093,8 +1346,11 @@ extern "C" {
             LockToggle = nullptr;
             BossToggle = nullptr;
             TotalToggle = nullptr;
+            MobPanel = nullptr;
+            TargetWidget = nullptr;
             AttachedRoot = Root;
             CreateMeterWindow(Root);
+            CreateMobPanel(Root);
         }
         if (!Window) {
             CachedHost->ReportStatus(ModHealthLevel::Broken, "Couldn't create the DPS window.");
@@ -1107,6 +1363,7 @@ extern "C" {
             Window->isVisible = true;
         }
         SyncToggles();
+        SyncMobPanel(Root, tickContext, Clock::now());
         if (!Window->isVisible) {
             if (Tooltip && Tooltip->isVisible) Tooltip->ToggleVisibilityRecursively(false);
             HoveredRow = -1;
