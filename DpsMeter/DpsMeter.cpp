@@ -8,11 +8,13 @@
 #include "TEWGuageWidget.h"
 #include "TEWCustomPanelWidget.h"
 #include "TEWGraphicButtonWidget.h"
+#include "TNTIconWidget.h"
 #include "CInfoPacket.h"
 #include "CMapPacket.h"
 #include "InPacket.h"
 #include "RBossPacket.h"
 #include "SuPacket.h"
+#include "SkillCatalog.h"
 
 #include <algorithm>
 #include <chrono>
@@ -35,7 +37,7 @@ namespace {
     constexpr size_t MaxHistory = 5;
 
     constexpr uint16_t WindowWidth = 380;
-    constexpr uint16_t TooltipWidth = 320;
+    constexpr uint16_t TooltipWidth = 340;
     constexpr int16_t Pad = 14;
     constexpr int16_t ContentTop = 40;
     constexpr int16_t LineHeight = 18;
@@ -62,10 +64,29 @@ namespace {
         {TEWGraphicButtonWidget::ClassName, TEWGraphicButtonWidget::Version, TEWGraphicButtonWidget::ExpectedSize},
         {TEWGuageWidget::ClassName, TEWGuageWidget::Version, TEWGuageWidget::ExpectedSize},
         {TEWLabel::ClassName, TEWLabel::Version, TEWLabel::ExpectedSize},
+        {TNTIconWidget::ClassName, TNTIconWidget::Version, TNTIconWidget::ExpectedSize},
     };
 
+    const SkillCatalog::Skill* FindSkill(const int SkillVNum) {
+        static bool Loaded = false;
+        static std::chrono::steady_clock::time_point LastAttempt;
+        const auto Now = std::chrono::steady_clock::now();
+        if (!Loaded && (LastAttempt == std::chrono::steady_clock::time_point{} || Now - LastAttempt > std::chrono::seconds(5))) {
+            LastAttempt = Now;
+            Loaded = SkillCatalog::Load();
+        }
+        return SkillCatalog::Find(SkillVNum);
+    }
+
     std::wstring SkillName(const int SkillVNum) {
+        const SkillCatalog::Skill* Skill = FindSkill(SkillVNum);
+        if (Skill && !Skill->Name.empty()) return Skill->Name;
         return L"Skill " + std::to_wstring(SkillVNum);
+    }
+
+    int16_t SkillIcon(const int SkillVNum) {
+        const SkillCatalog::Skill* Skill = FindSkill(SkillVNum);
+        return Skill ? Skill->Icon : static_cast<int16_t>(-1);
     }
 
     struct Hit {
@@ -189,6 +210,7 @@ namespace {
     TEWLabel* TooltipHeaderName = nullptr;
     TEWLabel* TooltipHeaderValue = nullptr;
     BarRow TooltipRows[MaxTooltipSkills];
+    TNTIconWidget* TooltipIcons[MaxTooltipSkills] = {};
     std::wstring ShownTooltipTitle, ShownTooltipStats;
     int LaidOutTooltipRows = -1;
 
@@ -488,12 +510,12 @@ namespace {
         return Row;
     }
 
-    void PlaceBarRow(BarRow& Row, const int16_t Y, const int16_t Width) {
+    void PlaceBarRow(BarRow& Row, const int16_t Y, const int16_t Width, const int16_t X = Pad) {
         constexpr int16_t TextInset = 4;
         const int16_t TextY = static_cast<int16_t>(Y + (BarHeight - 12) / 2);
-        Place(Row.Bar, Pad, Y, Width, BarHeight);
-        Place(Row.Name, Pad + TextInset, static_cast<int16_t>(TextY + TextNudge), Width * 3 / 5, 30);
-        Place(Row.Value, static_cast<int16_t>(Pad + Width * 2 / 5 - TextInset), static_cast<int16_t>(TextY + TextNudge),
+        Place(Row.Bar, X, Y, Width, BarHeight);
+        Place(Row.Name, static_cast<int16_t>(X + TextInset), static_cast<int16_t>(TextY + TextNudge), Width * 3 / 5, 30);
+        Place(Row.Value, static_cast<int16_t>(X + Width * 2 / 5 - TextInset), static_cast<int16_t>(TextY + TextNudge),
               static_cast<int16_t>(Width * 3 / 5), 30);
         if (Row.Name) Row.Name->pxPerLine = Width * 3 / 5;
         if (Row.Value) Row.Value->pxPerLine = static_cast<int16_t>(Width * 3 / 5);
@@ -740,6 +762,33 @@ namespace {
         SetPanelHeight(Window, static_cast<uint16_t>(Y + 10));
     }
 
+    TNTIconWidget* CreateSkillIcon() {
+        TNTIconWidget* Icon = Widget::Create<TNTIconWidget>(CachedHost);
+        if (!Icon) return nullptr;
+        auto* Raw = reinterpret_cast<uint8_t*>(Icon);
+        Icon->keepTransparency = false;
+        Icon->resized = true;
+        *reinterpret_cast<float*>(Raw + 0x90) = 1.0f;
+        Icon->imageIf = 4;
+        Raw[0xAB] = 1;
+        Raw[0xAC] = 1;
+        Raw[0xAE] = 10;
+        Raw[0xD3] = 1;
+        Icon->isInteractable = false;
+        Icon->color = Color(254, 255, 255, 255);
+        delete Icon->image;
+        Icon->image = reinterpret_cast<IconProperties*>(new uint8_t[0x40]{});
+        Icon->isVisible = false;
+        return Icon;
+    }
+
+    void SetSkillIcon(TNTIconWidget* Icon, const int16_t IconId) {
+        if (!Icon || !Icon->image) return;
+        const bool Visible = IconId >= 0;
+        if (Visible && Icon->image->imageID != IconId) Icon->image->imageID = IconId;
+        if (Icon->isVisible != Visible) Icon->isVisible = Visible;
+    }
+
     void LayOutTooltip(const int SkillRows) {
         if (SkillRows == LaidOutTooltipRows) return;
         LaidOutTooltipRows = SkillRows;
@@ -747,7 +796,9 @@ namespace {
         const int16_t RowsTop = ContentTop + 2 * LineHeight;
         PlaceHeaders(TooltipHeaderName, TooltipHeaderValue, ContentTop + LineHeight, Width);
         for (int i = 0; i < MaxTooltipSkills; i++) {
-            PlaceBarRow(TooltipRows[i], static_cast<int16_t>(RowsTop + i * RowHeight), Width);
+            const int16_t Y = static_cast<int16_t>(RowsTop + i * RowHeight);
+            Place(TooltipIcons[i], Pad, Y, BarHeight, BarHeight);
+            PlaceBarRow(TooltipRows[i], Y, static_cast<int16_t>(Width - BarHeight - 4), static_cast<int16_t>(Pad + BarHeight + 4));
             ShowBarRow(TooltipRows[i], i < SkillRows);
         }
         SetPanelHeight(Tooltip, static_cast<uint16_t>(RowsTop + SkillRows * RowHeight + 10));
@@ -769,6 +820,10 @@ namespace {
         TooltipHeaderName = AddHeader(Tooltip, L"Skill", (TooltipWidth - 2 * Pad) / 2, 1);
         TooltipHeaderValue = AddHeader(Tooltip, L"Share | Hits", (TooltipWidth - 2 * Pad) / 2, 2);
         for (auto& Row : TooltipRows) Row = AddBarRow(Tooltip);
+        for (auto& Icon : TooltipIcons) {
+            Icon = CreateSkillIcon();
+            Attach(Tooltip, Icon);
+        }
         Tooltip->ToggleVisibilityRecursively(false);
         ShownTooltipTitle.clear();
         ShownTooltipStats.clear();
@@ -932,6 +987,9 @@ namespace {
             const double Share = static_cast<double>(S.Damage) / static_cast<double>(std::max(1LL, P.Damage));
             std::swprintf(Buffer, std::size(Buffer), L"%d%% | %dx",static_cast<int>(Share * 100), S.Hits);
             UpdateBarRow(TooltipRows[i], SkillName(S.Skill), Buffer, static_cast<float>(Share), BarColor(P.Id));
+        }
+        for (int i = 0; i < MaxTooltipSkills; i++) {
+            SetSkillIcon(TooltipIcons[i], i < SkillRows ? SkillIcon(P.Skills[i].Skill) : static_cast<int16_t>(-1));
         }
 
         const POINT Meter = AbsoluteTopLeft(Window);
