@@ -16,6 +16,7 @@
 #include "RBossPacket.h"
 #include "SuPacket.h"
 #include "SkillCatalog.h"
+#include "GameHint.h"
 
 #include <algorithm>
 #include <chrono>
@@ -131,9 +132,15 @@ namespace {
     std::deque<Fight> History;
     size_t ViewIndex = 0;
 
+    constexpr int MobRowChoices[] = {3, 5, 10};
+
     struct Settings {
-        int16_t X = 20;
-        int16_t Y = 200;
+        int Corner = 0;
+        int CornerX = 20;
+        int CornerY = 200;
+        bool ShowMeter = false;
+        bool ShowMobDamage = true;
+        int MobRows = 3;
         bool Locked = false;
         bool BossOnly = false;
         bool ShowTotal = true;
@@ -188,8 +195,7 @@ namespace {
     constexpr ptrdiff_t VmtClassName = -0x2C;
     constexpr int TargetMonster = 3;
     constexpr auto TargetRescanInterval = std::chrono::milliseconds(500);
-    constexpr int MobPanelRows = 3;
-    constexpr int MaxMobRows = MobPanelRows;
+    constexpr int MaxMobRows = 10;
     constexpr int MobSelfSlot = MaxMobRows;
     constexpr int MobSlots = MaxMobRows + 1;
     constexpr int16_t MobPanelWidth = 190;
@@ -224,6 +230,20 @@ namespace {
     int MobScroll = 0;
     Clock::time_point LastMobRefresh;
 
+    constexpr uint16_t SettingsWidth = 300;
+    constexpr int16_t HelpWidth = 22;
+    TEWCustomPanelWidget* SettingsWindow = nullptr;
+    TEWGraphicButtonWidget* ShowMeterBox = nullptr;
+    TEWGraphicButtonWidget* ShowMobBox = nullptr;
+    TEWGraphicButtonWidget* MobRowBoxes[std::size(MobRowChoices)] = {};
+    bool MobRowChecked[std::size(MobRowChoices)] = {};
+    TEWLabel* ShowMeterHelp = nullptr;
+    TEWLabel* ShowMobHelp = nullptr;
+    bool SettingsPlaced = false;
+    bool MeterShown = false;
+    bool WasLoading = true;
+    int16_t PlacedX = 0, PlacedY = 0;
+    int PlacedScreenWidth = 0, PlacedScreenHeight = 0;
 
     TEWCustomPanelWidget* Window = nullptr;
     TEWLabel* TitleLabel = nullptr;
@@ -261,7 +281,6 @@ namespace {
     int HoveredRow = -1;
     int Scroll = 0;
     Clock::time_point LastRefresh;
-    bool HiddenForLoading = false;
 
     std::wstring ToWide(const std::string& Text) {
         if (Text.empty()) return {};
@@ -330,8 +349,19 @@ namespace {
 
     void LoadSettings() {
         const std::string Path = SettingsPath();
-        Config.X = static_cast<int16_t>(GetPrivateProfileIntA("DpsMeter", "X", Config.X, Path.c_str()));
-        Config.Y = static_cast<int16_t>(GetPrivateProfileIntA("DpsMeter", "Y", Config.Y, Path.c_str()));
+        Config.Corner = static_cast<int>(GetPrivateProfileIntA("DpsMeter", "Corner", -1, Path.c_str()));
+        if (Config.Corner < 0 || Config.Corner > 3) {
+            Config.Corner = 0;
+            Config.CornerX = static_cast<int>(GetPrivateProfileIntA("DpsMeter", "X", Config.CornerX, Path.c_str()));
+            Config.CornerY = static_cast<int>(GetPrivateProfileIntA("DpsMeter", "Y", Config.CornerY, Path.c_str()));
+        } else {
+            Config.CornerX = static_cast<int>(GetPrivateProfileIntA("DpsMeter", "CornerX", Config.CornerX, Path.c_str()));
+            Config.CornerY = static_cast<int>(GetPrivateProfileIntA("DpsMeter", "CornerY", Config.CornerY, Path.c_str()));
+        }
+        Config.ShowMeter = GetPrivateProfileIntA("DpsMeter", "ShowMeter", 0, Path.c_str()) != 0;
+        Config.ShowMobDamage = GetPrivateProfileIntA("DpsMeter", "ShowMobDamage", 1, Path.c_str()) != 0;
+        Config.MobRows = static_cast<int>(GetPrivateProfileIntA("DpsMeter", "MobRows", 3, Path.c_str()));
+        if (std::find(std::begin(MobRowChoices), std::end(MobRowChoices), Config.MobRows) == std::end(MobRowChoices)) Config.MobRows = 3;
         Config.Locked = GetPrivateProfileIntA("DpsMeter", "Locked", 0, Path.c_str()) != 0;
         Config.BossOnly = GetPrivateProfileIntA("DpsMeter", "BossOnly", 0, Path.c_str()) != 0;
         Config.ShowTotal = GetPrivateProfileIntA("DpsMeter", "ShowTotal", 1, Path.c_str()) != 0;
@@ -339,8 +369,14 @@ namespace {
 
     void SaveSettings() {
         const std::string Path = SettingsPath();
-        WritePrivateProfileStringA("DpsMeter", "X", std::to_string(Config.X).c_str(), Path.c_str());
-        WritePrivateProfileStringA("DpsMeter", "Y", std::to_string(Config.Y).c_str(), Path.c_str());
+        WritePrivateProfileStringA("DpsMeter", "X", nullptr, Path.c_str());
+        WritePrivateProfileStringA("DpsMeter", "Y", nullptr, Path.c_str());
+        WritePrivateProfileStringA("DpsMeter", "Corner", std::to_string(Config.Corner).c_str(), Path.c_str());
+        WritePrivateProfileStringA("DpsMeter", "CornerX", std::to_string(Config.CornerX).c_str(), Path.c_str());
+        WritePrivateProfileStringA("DpsMeter", "CornerY", std::to_string(Config.CornerY).c_str(), Path.c_str());
+        WritePrivateProfileStringA("DpsMeter", "ShowMeter", Config.ShowMeter ? "1" : "0", Path.c_str());
+        WritePrivateProfileStringA("DpsMeter", "ShowMobDamage", Config.ShowMobDamage ? "1" : "0", Path.c_str());
+        WritePrivateProfileStringA("DpsMeter", "MobRows", std::to_string(Config.MobRows).c_str(), Path.c_str());
         WritePrivateProfileStringA("DpsMeter", "Locked", Config.Locked ? "1" : "0", Path.c_str());
         WritePrivateProfileStringA("DpsMeter", "BossOnly", Config.BossOnly ? "1" : "0", Path.c_str());
         WritePrivateProfileStringA("DpsMeter", "ShowTotal", Config.ShowTotal ? "1" : "0", Path.c_str());
@@ -883,10 +919,52 @@ namespace {
         Attach(Root, Tooltip);
     }
 
+    int ScreenWidth() {
+        return AttachedRoot ? AttachedRoot->rect.right - AttachedRoot->rect.left : 1920;
+    }
+
+    int ScreenHeight() {
+        return AttachedRoot ? AttachedRoot->rect.bottom - AttachedRoot->rect.top : 1080;
+    }
+
+    void PlaceMeter() {
+        const int Width = ScreenWidth(), Height = ScreenHeight();
+        const int WindowW = Window->rect.right - Window->rect.left;
+        const int WindowH = Window->rect.bottom - Window->rect.top;
+        int X = Config.Corner & 1 ? Width - Config.CornerX : Config.CornerX;
+        int Y = Config.Corner & 2 ? Height - Config.CornerY : Config.CornerY;
+        X = std::clamp(X, 0, std::max(0, Width - WindowW));
+        Y = std::clamp(Y, 0, std::max(0, Height - WindowH));
+        Place(Window, static_cast<int16_t>(X), static_cast<int16_t>(Y), static_cast<int16_t>(WindowW), static_cast<int16_t>(WindowH));
+        PlacedX = Window->rect.left;
+        PlacedY = Window->rect.top;
+        PlacedScreenWidth = Width;
+        PlacedScreenHeight = Height;
+    }
+
+    void RememberMeterPosition() {
+        const int Width = ScreenWidth(), Height = ScreenHeight();
+        const bool Right = (Window->rect.left + Window->rect.right) / 2 > Width / 2;
+        const bool Bottom = (Window->rect.top + Window->rect.bottom) / 2 > Height / 2;
+        Config.Corner = (Right ? 1 : 0) | (Bottom ? 2 : 0);
+        Config.CornerX = Right ? Width - Window->rect.left : Window->rect.left;
+        Config.CornerY = Bottom ? Height - Window->rect.top : Window->rect.top;
+        PlacedX = Window->rect.left;
+        PlacedY = Window->rect.top;
+    }
+
+    void SyncMeterPosition() {
+        if (!Window || Window->isBeingDragged) return;
+        if (ScreenWidth() != PlacedScreenWidth || ScreenHeight() != PlacedScreenHeight) {
+            PlaceMeter();
+        } else if (Window->rect.left != PlacedX || Window->rect.top != PlacedY) {
+            RememberMeterPosition();
+            SaveSettings();
+        }
+    }
+
     void CreateMeterWindow(TLBSWidget* Root) {
-        const WidgetKit::WindowDesc Desc{
-            WidgetKit::WindowStyle::Plain, Config.X, Config.Y, WindowWidth, 200, L"DPS Meter", true
-        };
+        const WidgetKit::WindowDesc Desc{WidgetKit::WindowStyle::Plain, 0, 0, WindowWidth, 200, L"DPS Meter", true};
         Window = WidgetKit::CreateGameWindow(CachedHost, Desc);
         if (!Window) return;
         Window->isRestrictedToScreen = true;
@@ -917,6 +995,7 @@ namespace {
         LaidOutRows = -1;
         ApplyLock();
         Window->isVisible = false;
+        PlaceMeter();
         Attach(Root, Window);
 
         LockToggle = WidgetKit::CreateLabeledCheckbox(CachedHost, 0, 0, L"Lock", ToggleTextWidth,
@@ -933,8 +1012,11 @@ namespace {
     }
 
     void DestroyWidgets() {
+        GameHint::Destroy();
         Detach(MobPanel);
+        Detach(SettingsWindow);
         MobPanel = nullptr;
+        SettingsWindow = nullptr;
         TargetWidget = nullptr;
         Detach(Tooltip);
         Detach(LockToggle);
@@ -999,12 +1081,6 @@ namespace {
         SetText(FooterLabel, ShownFooter, Footer);
         Show(OlderButton, !Config.Locked && ViewIndex < History.size());
         Show(NewerButton, !Config.Locked && ViewIndex > 0);
-
-        if (!Window->isBeingDragged && (Window->rect.left != Config.X || Window->rect.top != Config.Y)) {
-            Config.X = Window->rect.left;
-            Config.Y = Window->rect.top;
-            SaveSettings();
-        }
 
     }
 
@@ -1223,8 +1299,8 @@ namespace {
         std::sort(Dealt.begin(), Dealt.end(), [](const auto& A, const auto& B) { return A.second > B.second; });
 
         const int Count = static_cast<int>(Dealt.size());
-        const int Rows = std::min(MobPanelRows, Count);
-        MobScroll = std::clamp(MobScroll, 0, std::max(0, Count - MobPanelRows));
+        const int Rows = std::min(Config.MobRows, Count);
+        MobScroll = std::clamp(MobScroll, 0, std::max(0, Count - Config.MobRows));
         const auto Self = std::find_if(Dealt.begin(), Dealt.end(), [](const auto& Entry) { return Entry.first == OwnCharacterId; });
         const int SelfIndex = Self == Dealt.end() ? -1 : static_cast<int>(Self - Dealt.begin());
         const bool HasSelf = SelfIndex >= 0 && (SelfIndex < MobScroll || SelfIndex >= MobScroll + Rows);
@@ -1245,7 +1321,7 @@ namespace {
         if (HasSelf) Update(MobSelfSlot, SelfIndex);
 
         std::wstring Title = L"Damage";
-        if (Count > MobPanelRows) {
+        if (Count > Config.MobRows) {
             wchar_t Buffer[48];
             std::swprintf(Buffer, std::size(Buffer), L"  %d-%d of %d", MobScroll + 1, MobScroll + Rows, Count);
             Title += Buffer;
@@ -1256,7 +1332,7 @@ namespace {
     void SyncMobPanel(TLBSWidget* Root, const TickContext& Context, const Clock::time_point Now) {
         if (!MobPanel) return;
         TLBSWidget* Target = FindTarget(Root, Now);
-        const bool Targeted = Target && Target->isVisible && SelectedType == TargetMonster;
+        const bool Targeted = Config.ShowMobDamage && Target && Target->isVisible && SelectedType == TargetMonster;
         const auto Damage = Targeted ? MobDamage.find(SelectedId) : MobDamage.end();
         if (Damage == MobDamage.end() || Damage->second.empty()) {
             HideMobPanel();
@@ -1290,6 +1366,147 @@ namespace {
         const TLBSWidgetList* Siblings = Root->childrenList;
         if (Siblings->index_of(MobPanel) < Siblings->index_of(Target)) MobPanel->BubbleUp();
     }
+
+    TEWGraphicButtonWidget* CheckboxOf(TLBSWidget* LabeledCheckbox) {
+        if (!LabeledCheckbox || !LabeledCheckbox->childrenList || LabeledCheckbox->childrenList->count == 0) return nullptr;
+        return static_cast<TEWGraphicButtonWidget*>(LabeledCheckbox->childrenList->list[0]);
+    }
+
+    void SyncSettingsChecks() {
+        WidgetKit::SetChecked(ShowMeterBox, Config.ShowMeter);
+        WidgetKit::SetChecked(ShowMobBox, Config.ShowMobDamage);
+        for (size_t i = 0; i < std::size(MobRowChoices); i++) {
+            MobRowChecked[i] = Config.MobRows == MobRowChoices[i];
+            WidgetKit::SetChecked(MobRowBoxes[i], MobRowChecked[i]);
+        }
+    }
+
+    void __cdecl OnShowMeterChanged(void*) {
+        MeterShown = Config.ShowMeter;
+        if (Window) {
+            Show(Window, Config.ShowMeter);
+            if (Config.ShowMeter) Window->BubbleUp();
+        }
+        SaveSettings();
+        RequestRefresh();
+    }
+
+    void __cdecl OnShowMobChanged(void*) {
+        SaveSettings();
+    }
+
+    void __cdecl OnMobRowsChanged(void* Argument) {
+        Config.MobRows = MobRowChoices[reinterpret_cast<uintptr_t>(Argument)];
+        SyncSettingsChecks();
+        LastMobRefresh = {};
+        SaveSettings();
+    }
+
+    TEWLabel* AddHelpLabel(TLBSWidget* Parent, const int16_t X, const int16_t Y) {
+        TEWLabel* Label = Widget::Create<TEWLabel>(CachedHost);
+        if (!Label) return nullptr;
+        Place(Label, X, Y, HelpWidth, 30);
+        Label->textAlignment = 1;
+        Label->pxPerLine = HelpWidth;
+        Label->textColor = Color(255, 150, 200, 255);
+        Label->SetText(L"(?)");
+        Attach(Parent, Label);
+        return Label;
+    }
+
+    TLBSWidget* AddSetting(const int16_t X, const int16_t Y, const wchar_t* Text, bool* Value, const WidgetKit::ClickFn OnChange,
+                           void* Argument, int16_t& Right) {
+        const auto TextWidth = static_cast<int16_t>(std::max(10, WidgetKit::MeasureText(1, Text) + 4));
+        TLBSWidget* Setting = WidgetKit::CreateLabeledCheckbox(CachedHost, X, Y, Text, TextWidth, Value, OnChange, Argument);
+        Attach(SettingsWindow, Setting);
+        Right = static_cast<int16_t>(X + 15 + 4 + TextWidth);
+        return Setting;
+    }
+
+    void CreateSettingsWindow(TLBSWidget* Root) {
+        const WidgetKit::WindowDesc Desc{WidgetKit::WindowStyle::Plain, 0, 0, SettingsWidth, 130, L"DPS Meter", true};
+        SettingsWindow = WidgetKit::CreateGameWindow(CachedHost, Desc);
+        if (!SettingsWindow) return;
+        SettingsWindow->isRestrictedToScreen = true;
+
+        int16_t Right = 0;
+        int16_t Y = ContentTop + 4;
+        ShowMeterBox = CheckboxOf(AddSetting(Pad, Y, L"Show meter", &Config.ShowMeter, &OnShowMeterChanged, nullptr, Right));
+        ShowMeterHelp = AddHelpLabel(SettingsWindow, static_cast<int16_t>(Right + 2), Y);
+        Y += 24;
+        ShowMobBox = CheckboxOf(AddSetting(Pad, Y, L"Show damage per mob", &Config.ShowMobDamage, &OnShowMobChanged, nullptr, Right));
+        ShowMobHelp = AddHelpLabel(SettingsWindow, static_cast<int16_t>(Right + 2), Y);
+        Y += 24;
+
+        if (TEWLabel* RowsLabel = Widget::Create<TEWLabel>(CachedHost)) {
+            constexpr wchar_t RowsText[] = L"Players per mob:";
+            const auto Width = static_cast<int16_t>(std::max(10, WidgetKit::MeasureText(1, RowsText) + 4));
+            Place(RowsLabel, static_cast<int16_t>(Pad + 19), Y, Width, 30);
+            RowsLabel->textAlignment = 1;
+            RowsLabel->pxPerLine = Width;
+            RowsLabel->SetText(RowsText);
+            Attach(SettingsWindow, RowsLabel);
+            Right = static_cast<int16_t>(Pad + 19 + Width + 8);
+        }
+        for (size_t i = 0; i < std::size(MobRowChoices); i++) {
+            const std::wstring Text = std::to_wstring(MobRowChoices[i]);
+            int16_t Next = 0;
+            MobRowBoxes[i] = CheckboxOf(AddSetting(Right, Y, Text.c_str(), &MobRowChecked[i], &OnMobRowsChanged,
+                                                   reinterpret_cast<void*>(i), Next));
+            Right = static_cast<int16_t>(Next + 10);
+        }
+        Y += 24;
+
+        SetPanelHeight(SettingsWindow, static_cast<uint16_t>(Y + 6));
+        SyncSettingsChecks();
+        SettingsPlaced = false;
+        SettingsWindow->isVisible = false;
+        Attach(Root, SettingsWindow);
+    }
+
+    void SyncSettings(TLBSWidget* Root, const TickContext& Context) {
+        if (!SettingsWindow || !SettingsWindow->isVisible) {
+            GameHint::Hide();
+            return;
+        }
+        static const std::vector<std::wstring> MeterHelp = {
+            L"Shows the DPS meter window.",
+            L"Lock, Boss and Total sit in its title bar;",
+            L"hover a player to see their skills.",
+        };
+        static const std::vector<std::wstring> MobHelp = {
+            L"While you target a monster that has taken damage,",
+            L"a small list left of its window shows who dealt",
+            L"the most to it. Scroll it with the mouse wheel.",
+        };
+        const std::vector<std::wstring>* Lines = nullptr;
+        if (CursorOver(ShowMeterHelp, HelpWidth, 15)) Lines = &MeterHelp;
+        else if (CursorOver(ShowMobHelp, HelpWidth, 15)) Lines = &MobHelp;
+        if (!Lines) {
+            GameHint::Hide();
+            return;
+        }
+        if (GameHint::Create(CachedHost, Root)) GameHint::Show(*Lines, Context.mouseX, Context.mouseY);
+    }
+
+    void ToggleSettings() {
+        if (!SettingsWindow) return;
+        if (SettingsWindow->isVisible) {
+            Show(SettingsWindow, false);
+            GameHint::Hide();
+            return;
+        }
+        if (!SettingsPlaced && AttachedRoot) {
+            SettingsPlaced = true;
+            const int16_t Width = static_cast<int16_t>(SettingsWindow->rect.right - SettingsWindow->rect.left);
+            const int16_t Height = static_cast<int16_t>(SettingsWindow->rect.bottom - SettingsWindow->rect.top);
+            Place(SettingsWindow, static_cast<int16_t>((ScreenWidth() - Width) / 2), static_cast<int16_t>((ScreenHeight() - Height) / 2),
+                  Width, Height);
+        }
+        SyncSettingsChecks();
+        Show(SettingsWindow, true);
+        SettingsWindow->BubbleUp();
+    }
 }
 
 extern "C" {
@@ -1312,9 +1529,8 @@ extern "C" {
     }
 
     __declspec(dllexport) void ModShutdown() {
-        if (Window) {
-            Config.X = Window->rect.left;
-            Config.Y = Window->rect.top;
+        if (Window && !Window->isBeingDragged) {
+            RememberMeterPosition();
             SaveSettings();
         }
         DestroyWidgets();
@@ -1326,15 +1542,14 @@ extern "C" {
         if (!CachedHost || !Root || !Root->childrenList) return;
 
         if (!tickContext.isPlayerLoaded) {
-            if (Window && Window->isVisible) {
-                Window->isVisible = false;
-                HiddenForLoading = true;
-            }
+            Show(Window, false);
             Show(Tooltip, false);
             Show(LockToggle, false);
             Show(BossToggle, false);
             Show(TotalToggle, false);
             HideMobPanel();
+            GameHint::Hide();
+            WasLoading = true;
             HoveredRow = -1;
             EndCurrent = HasCurrent;
             return;
@@ -1347,10 +1562,15 @@ extern "C" {
             BossToggle = nullptr;
             TotalToggle = nullptr;
             MobPanel = nullptr;
+            SettingsWindow = nullptr;
             TargetWidget = nullptr;
+            GameHint::Destroy();
             AttachedRoot = Root;
             CreateMeterWindow(Root);
             CreateMobPanel(Root);
+            CreateSettingsWindow(Root);
+            MeterShown = false;
+            WasLoading = true;
         }
         if (!Window) {
             CachedHost->ReportStatus(ModHealthLevel::Broken, "Couldn't create the DPS window.");
@@ -1358,12 +1578,20 @@ extern "C" {
         }
         CachedHost->ReportStatus(ModHealthLevel::Ok, "");
 
-        if (HiddenForLoading) {
-            HiddenForLoading = false;
-            Window->isVisible = true;
+        if (WasLoading) {
+            WasLoading = false;
+            Show(Window, Config.ShowMeter);
+            MeterShown = Config.ShowMeter;
+        } else if (MeterShown && !Window->isVisible) {
+            MeterShown = false;
+            Config.ShowMeter = false;
+            SyncSettingsChecks();
+            SaveSettings();
         }
         SyncToggles();
+        SyncMeterPosition();
         SyncMobPanel(Root, tickContext, Clock::now());
+        SyncSettings(Root, tickContext);
         if (!Window->isVisible) {
             if (Tooltip && Tooltip->isVisible) Tooltip->ToggleVisibilityRecursively(false);
             HoveredRow = -1;
@@ -1382,8 +1610,6 @@ extern "C" {
     __declspec(dllexport) void ModTick(const TLBSWidget*, TickContext) {}
 
     __declspec(dllexport) void ModToggleMainWindow() {
-        if (!Window) return;
-        Window->isVisible = !Window->isVisible;
-        HiddenForLoading = false;
+        ToggleSettings();
     }
 }

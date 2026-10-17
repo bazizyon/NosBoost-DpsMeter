@@ -23,6 +23,8 @@ FetchContent_MakeAvailable(imgui)
 add_library(DpsMeter SHARED
         DpsMeter/DpsMeter.cpp
         DpsMeter/SkillCatalog.cpp
+        DpsMeter/GameCall.cpp
+        DpsMeter/GameHint.cpp
         WidgetKit/WidgetKit.cpp
         ${imgui_SOURCE_DIR}/imgui.cpp
         ${imgui_SOURCE_DIR}/imgui_draw.cpp
