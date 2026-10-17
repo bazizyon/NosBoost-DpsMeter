@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 4.1)
-project(DpsMeter)
+project(Trackers)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -20,21 +20,31 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(imgui)
 
-add_library(DpsMeter SHARED
+add_library(Trackers SHARED
+        Trackers/Trackers.cpp
+        Trackers/Records.cpp
+        Trackers/GameData.cpp
         DpsMeter/DpsMeter.cpp
         DpsMeter/SkillCatalog.cpp
+        DpsMeter/MapCatalog.cpp
         DpsMeter/GameCall.cpp
         DpsMeter/GameHint.cpp
+        ExpSession/ExpSession.cpp
+        RaidHistory/RaidHistory.cpp
         WidgetKit/WidgetKit.cpp
+        WidgetKit/Dropdown.cpp
         ${imgui_SOURCE_DIR}/imgui.cpp
         ${imgui_SOURCE_DIR}/imgui_draw.cpp
         ${imgui_SOURCE_DIR}/imgui_tables.cpp
         ${imgui_SOURCE_DIR}/imgui_widgets.cpp
 )
 
-target_include_directories(DpsMeter PRIVATE
+target_include_directories(Trackers PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
         ${CMAKE_CURRENT_SOURCE_DIR}/WidgetKit
+        ${CMAKE_CURRENT_SOURCE_DIR}/Trackers
+        ${CMAKE_CURRENT_SOURCE_DIR}/DpsMeter
+        ${CMAKE_CURRENT_SOURCE_DIR}/RaidHistory
         ${nosboost_sdk_SOURCE_DIR}/classes
         ${nosboost_sdk_SOURCE_DIR}/classes/enums
         ${nosboost_sdk_SOURCE_DIR}/classes/structs
@@ -43,10 +53,10 @@ target_include_directories(DpsMeter PRIVATE
         ${imgui_SOURCE_DIR}
 )
 
-target_compile_options(DpsMeter PRIVATE /EHsc /MP)
+target_compile_options(Trackers PRIVATE /EHsc /MP)
 
 if(NOT DEFINED ENV{CI})
-    set_target_properties(DpsMeter PROPERTIES
+    set_target_properties(Trackers PROPERTIES
             RUNTIME_OUTPUT_DIRECTORY "C:/Program Files (x86)/Nostale/mods"
     )
 endif()

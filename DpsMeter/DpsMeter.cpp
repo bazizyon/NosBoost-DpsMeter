@@ -16,7 +16,10 @@
 #include "RBossPacket.h"
 #include "SuPacket.h"
 #include "SkillCatalog.h"
+#include "MapCatalog.h"
 #include "GameHint.h"
+#include "Features.h"
+#include "RaidHistory.h"
 
 #include <algorithm>
 #include <chrono>
@@ -81,6 +84,17 @@ namespace {
         return SkillCatalog::Find(SkillVNum);
     }
 
+    std::wstring MapName(const int MapId) {
+        static bool Loaded = false;
+        static std::chrono::steady_clock::time_point LastAttempt;
+        const auto Now = std::chrono::steady_clock::now();
+        if (!Loaded && (LastAttempt == std::chrono::steady_clock::time_point{} || Now - LastAttempt > std::chrono::seconds(5))) {
+            LastAttempt = Now;
+            Loaded = MapCatalog::Load();
+        }
+        return MapCatalog::Name(MapId);
+    }
+
     std::wstring SkillName(const int SkillVNum) {
         const SkillCatalog::Skill* Skill = FindSkill(SkillVNum);
         if (Skill && !Skill->Name.empty()) return Skill->Name;
@@ -106,6 +120,7 @@ namespace {
         std::vector<Hit> Hits;
         Clock::time_point LastHit;
         bool BossMap = false;
+        int MapId = 0;
     };
 
     struct PlayerInfo {
@@ -124,6 +139,7 @@ namespace {
     std::unordered_map<long, PlayerInfo> Players;
     std::unordered_map<long, BossInfo> Bosses;
     bool BossOnMap = false;
+    int CurrentMapId = 0;
     std::unordered_map<long, std::unordered_map<long, long long>> MobDamage;
 
     Fight Current;
@@ -146,6 +162,7 @@ namespace {
         bool ShowTotal = true;
         bool SplitFights = true;
         int FightSeconds = 5;
+        bool SplitOnMap = true;
     } Config;
 
     struct SkillTotal {
@@ -232,9 +249,17 @@ namespace {
     int MobScroll = 0;
     Clock::time_point LastMobRefresh;
 
-    constexpr uint16_t SettingsWidth = 300;
+    constexpr uint16_t SettingsWidth = 680;
+    constexpr int PageCount = 3;
+    constexpr int16_t PageTabsTop = 42;
+    constexpr int16_t PageShift = 36;
     constexpr int16_t HelpWidth = 22;
     TEWCustomPanelWidget* SettingsWindow = nullptr;
+    TLBSWidget* Pages[PageCount]{};
+    WidgetKit::Tab PageTabs[PageCount]{};
+    uint16_t PageHeights[PageCount]{};
+    int ActivePage = 0;
+    TLBSWidget* DpsPage = nullptr;
     TEWGraphicButtonWidget* ShowMeterBox = nullptr;
     TEWGraphicButtonWidget* ShowMobBox = nullptr;
     TEWGraphicButtonWidget* MobRowBoxes[std::size(MobRowChoices)] = {};
@@ -242,6 +267,8 @@ namespace {
     TEWLabel* ShowMeterHelp = nullptr;
     TEWLabel* ShowMobHelp = nullptr;
     TEWLabel* SplitHelp = nullptr;
+    TEWLabel* SplitMapHelp = nullptr;
+    TEWGraphicButtonWidget* SplitMapBox = nullptr;
     TEWGraphicButtonWidget* SplitBox = nullptr;
     WidgetKit::EditBox SecondsBox{};
     std::wstring ShownSeconds;
@@ -350,7 +377,7 @@ namespace {
         char Path[MAX_PATH];
         GetModuleFileNameA(nullptr, Path, MAX_PATH);
         std::string Dir(Path);
-        return Dir.substr(0, Dir.find_last_of("\\/") + 1) + "mods\\DpsMeter.ini";
+        return Dir.substr(0, Dir.find_last_of("\\/") + 1) + "mods\\Trackers\\DpsMeter.ini";
     }
 
     void LoadSettings() {
@@ -373,6 +400,7 @@ namespace {
         Config.ShowTotal = GetPrivateProfileIntA("DpsMeter", "ShowTotal", 1, Path.c_str()) != 0;
         Config.SplitFights = GetPrivateProfileIntA("DpsMeter", "SplitFights", 1, Path.c_str()) != 0;
         Config.FightSeconds = std::max(1, static_cast<int>(GetPrivateProfileIntA("DpsMeter", "FightSeconds", 5, Path.c_str())));
+        Config.SplitOnMap = GetPrivateProfileIntA("DpsMeter", "SplitOnMap", 1, Path.c_str()) != 0;
     }
 
     void SaveSettings() {
@@ -390,6 +418,7 @@ namespace {
         WritePrivateProfileStringA("DpsMeter", "ShowTotal", Config.ShowTotal ? "1" : "0", Path.c_str());
         WritePrivateProfileStringA("DpsMeter", "SplitFights", Config.SplitFights ? "1" : "0", Path.c_str());
         WritePrivateProfileStringA("DpsMeter", "FightSeconds", std::to_string(Config.FightSeconds).c_str(), Path.c_str());
+        WritePrivateProfileStringA("DpsMeter", "SplitOnMap", Config.SplitOnMap ? "1" : "0", Path.c_str());
     }
 
     bool FightIdle(const Clock::time_point LastHit, const Clock::time_point Now) {
@@ -405,6 +434,7 @@ namespace {
         if (ViewIndex == 0) Scroll = 0;
         Current = Fight{};
         Current.BossMap = BossOnMap;
+        Current.MapId = CurrentMapId;
         Current.LastHit = Now;
         HasCurrent = true;
         EndCurrent = false;
@@ -506,7 +536,9 @@ namespace {
         return true;
     }
 
-    bool OnCMap(const Packet::CMapPacket&) {
+    bool OnCMap(const Packet::CMapPacket& Packet) {
+        CurrentMapId = Packet.mapId;
+        if (Config.SplitOnMap && HasCurrent) EndCurrent = true;
         BossOnMap = false;
         MobDamage.clear();
         SelectedType = 0;
@@ -542,7 +574,8 @@ namespace {
         const bool Crit = Packet.hitMode == HitMode::CriticalAttack || Packet.hitMode == HitMode::UnknownCriticalAttack;
         Current.Hits.push_back({Packet.userEntityID, Packet.targetEntityID, Packet.skillVNum,
                                 std::max(0, Packet.damage), Crit, Miss, Now});
-        if (!Miss && Packet.damage > 0) MobDamage[Packet.targetEntityID][Packet.userEntityID] += Packet.damage;
+        if (!Packet.targetAlive) MobDamage.erase(Packet.targetEntityID);
+        else if (!Miss && Packet.damage > 0) MobDamage[Packet.targetEntityID][Packet.userEntityID] += Packet.damage;
         return true;
     }
 
@@ -1087,6 +1120,9 @@ namespace {
         } else {
             std::swprintf(Buffer, std::size(Buffer), L"%zu fight%ls ago", ViewIndex, ViewIndex == 1 ? L"" : L"s");
             Footer = Buffer;
+            if (const Fight* Viewed = ViewedFight(); Config.SplitOnMap && Viewed) {
+                if (const std::wstring Map = MapName(Viewed->MapId); !Map.empty()) Footer += L" | " + Map;
+            }
         }
         if (PlayerCount > MaxRows) {
             std::swprintf(Buffer, std::size(Buffer), L" | %d-%d of %d", Scroll + 1, Scroll + VisibleRows, PlayerCount);
@@ -1390,6 +1426,7 @@ namespace {
         WidgetKit::SetChecked(ShowMeterBox, Config.ShowMeter);
         WidgetKit::SetChecked(ShowMobBox, Config.ShowMobDamage);
         WidgetKit::SetChecked(SplitBox, Config.SplitFights);
+        WidgetKit::SetChecked(SplitMapBox, Config.SplitOnMap);
         for (size_t i = 0; i < std::size(MobRowChoices); i++) {
             MobRowChecked[i] = Config.MobRows == MobRowChoices[i];
             WidgetKit::SetChecked(MobRowBoxes[i], MobRowChecked[i]);
@@ -1454,24 +1491,53 @@ namespace {
                            void* Argument, int16_t& Right) {
         const auto TextWidth = static_cast<int16_t>(std::max(10, WidgetKit::MeasureText(1, Text) + 4));
         TLBSWidget* Setting = WidgetKit::CreateLabeledCheckbox(CachedHost, X, Y, Text, TextWidth, Value, OnChange, Argument);
-        Attach(SettingsWindow, Setting);
+        Attach(DpsPage, Setting);
         Right = static_cast<int16_t>(X + 15 + 4 + TextWidth);
         return Setting;
     }
 
+    void ShowPage(const int Index) {
+        ActivePage = Index;
+        for (int i = 0; i < PageCount; i++) {
+            Show(Pages[i], i == Index);
+            WidgetKit::SetTabActive(PageTabs[i], i == Index);
+        }
+        if (SettingsWindow && PageHeights[Index]) SetPanelHeight(SettingsWindow, PageHeights[Index]);
+        GameHint::Hide();
+    }
+
+    void __cdecl OnPageTab(void* Argument) {
+        ShowPage(static_cast<int>(reinterpret_cast<intptr_t>(Argument)));
+    }
+
     void CreateSettingsWindow(TLBSWidget* Root) {
-        const WidgetKit::WindowDesc Desc{WidgetKit::WindowStyle::Plain, 0, 0, SettingsWidth, 130, L"DPS Meter", true};
+        const WidgetKit::WindowDesc Desc{WidgetKit::WindowStyle::Plain, 0, 0, SettingsWidth, 130, L"Trackers", true};
         SettingsWindow = WidgetKit::CreateGameWindow(CachedHost, Desc);
         if (!SettingsWindow) return;
         SettingsWindow->isRestrictedToScreen = true;
 
+        for (int i = 0; i < PageCount; i++) {
+            Pages[i] = Widget::Create<TLBSWidget>(CachedHost);
+            if (!Pages[i]) continue;
+            Place(Pages[i], 0, PageShift, SettingsWidth, 600);
+            Attach(SettingsWindow, Pages[i]);
+        }
+        const wchar_t* PageNames[PageCount] = {L"DPS Meter", L"EXP", L"Raids"};
+        constexpr int16_t TabWidth = (SettingsWidth - 2 * Pad - 2 * 6) / PageCount;
+        for (int i = 0; i < PageCount; i++) {
+            PageTabs[i] = WidgetKit::CreateTab(CachedHost, static_cast<int16_t>(Pad + i * (TabWidth + 6)), PageTabsTop, TabWidth,
+                                               PageNames[i], &OnPageTab, reinterpret_cast<void*>(static_cast<intptr_t>(i)));
+            Attach(SettingsWindow, PageTabs[i].Button);
+        }
+        DpsPage = Pages[0] ? Pages[0] : SettingsWindow;
+
         int16_t Right = 0;
         int16_t Y = ContentTop + 4;
         ShowMeterBox = CheckboxOf(AddSetting(Pad, Y, L"Show meter", &Config.ShowMeter, &OnShowMeterChanged, nullptr, Right));
-        ShowMeterHelp = AddHelpLabel(SettingsWindow, static_cast<int16_t>(Right + 2), Y);
+        ShowMeterHelp = AddHelpLabel(DpsPage, static_cast<int16_t>(Right + 2), Y);
         Y += 24;
         ShowMobBox = CheckboxOf(AddSetting(Pad, Y, L"Show damage per mob", &Config.ShowMobDamage, &OnShowMobChanged, nullptr, Right));
-        ShowMobHelp = AddHelpLabel(SettingsWindow, static_cast<int16_t>(Right + 2), Y);
+        ShowMobHelp = AddHelpLabel(DpsPage, static_cast<int16_t>(Right + 2), Y);
         Y += 24;
 
         if (TEWLabel* RowsLabel = Widget::Create<TEWLabel>(CachedHost)) {
@@ -1481,7 +1547,7 @@ namespace {
             RowsLabel->textAlignment = 1;
             RowsLabel->pxPerLine = Width;
             RowsLabel->SetText(RowsText);
-            Attach(SettingsWindow, RowsLabel);
+            Attach(DpsPage, RowsLabel);
             Right = static_cast<int16_t>(Pad + 19 + Width + 8);
         }
         for (size_t i = 0; i < std::size(MobRowChoices); i++) {
@@ -1495,7 +1561,7 @@ namespace {
 
         SplitBox = CheckboxOf(AddSetting(Pad, Y, L"Split fights after", &Config.SplitFights, &OnSplitChanged, nullptr, Right));
         SecondsBox = WidgetKit::CreateEditBox(CachedHost, static_cast<int16_t>(Right + 4), static_cast<int16_t>(Y - 3), 44, 21);
-        if (SecondsBox.Frame) Attach(SettingsWindow, SecondsBox.Frame);
+        if (SecondsBox.Frame) Attach(DpsPage, SecondsBox.Frame);
         ShownSeconds = std::to_wstring(Config.FightSeconds);
         if (SecondsBox.Edit) SecondsBox.Edit->SetText(ShownSeconds.c_str());
         Right = static_cast<int16_t>(Right + 4 + 44 + 6);
@@ -1506,13 +1572,20 @@ namespace {
             Unit->textAlignment = 1;
             Unit->pxPerLine = Width;
             Unit->SetText(UnitText);
-            Attach(SettingsWindow, Unit);
+            Attach(DpsPage, Unit);
             Right = static_cast<int16_t>(Right + Width);
         }
-        SplitHelp = AddHelpLabel(SettingsWindow, static_cast<int16_t>(Right + 2), Y);
+        SplitHelp = AddHelpLabel(DpsPage, static_cast<int16_t>(Right + 2), Y);
         Y += 24;
 
-        SetPanelHeight(SettingsWindow, static_cast<uint16_t>(Y + 6));
+        SplitMapBox = CheckboxOf(AddSetting(Pad, Y, L"Split fights on map change", &Config.SplitOnMap, &OnSplitChanged, nullptr, Right));
+        SplitMapHelp = AddHelpLabel(DpsPage, static_cast<int16_t>(Right + 2), Y);
+        Y += 24;
+
+        PageHeights[0] = static_cast<uint16_t>(PageShift + Y + 6);
+        if (Pages[1]) PageHeights[1] = static_cast<uint16_t>(PageShift + ExpSession::BuildPage(Pages[1], SettingsWidth));
+        if (Pages[2]) PageHeights[2] = static_cast<uint16_t>(PageShift + RaidHistory::BuildPage(Pages[2], SettingsWidth));
+        ShowPage(ActivePage);
         SyncSettingsChecks();
         SettingsPlaced = false;
         SettingsWindow->isVisible = false;
@@ -1524,12 +1597,25 @@ namespace {
             GameHint::Hide();
             return;
         }
+        if (ActivePage == 1) ExpSession::TickPage(Context);
+        if (ActivePage == 2) {
+            RaidHistory::TickPage(Root, Context);
+            return;
+        }
+        if (ActivePage != 0) {
+            GameHint::Hide();
+            return;
+        }
         ReadSecondsBox();
         static const std::vector<std::wstring> SplitHelpLines = {
             L"On: a new fight starts once nobody has hit",
             L"anything for this many seconds.",
-            L"Off: everything on this map adds up into one",
-            L"fight until you change maps.",
+            L"Off: idle time never ends a fight.",
+        };
+        static const std::vector<std::wstring> SplitMapLines = {
+            L"On: changing maps ends the fight, and older",
+            L"fights show the map they were on.",
+            L"Off: a fight keeps going across maps.",
         };
         static const std::vector<std::wstring> MeterHelp = {
             L"Shows the DPS meter window.",
@@ -1545,6 +1631,7 @@ namespace {
         if (CursorOver(ShowMeterHelp, HelpWidth, 15)) Lines = &MeterHelp;
         else if (CursorOver(ShowMobHelp, HelpWidth, 15)) Lines = &MobHelp;
         else if (CursorOver(SplitHelp, HelpWidth, 15)) Lines = &SplitHelpLines;
+        else if (CursorOver(SplitMapHelp, HelpWidth, 15)) Lines = &SplitMapLines;
         if (!Lines) {
             GameHint::Hide();
             return;
@@ -1572,15 +1659,8 @@ namespace {
     }
 }
 
-extern "C" {
-    __declspec(dllexport) const ModClassRequirement* ModGetRequirements(size_t* OutCount) {
-        *OutCount = std::size(Requirements);
-        return Requirements;
-    }
-
-    __declspec(dllexport) void ModStartup(
-        ImGuiContext*, ImGuiMemAllocFunc, ImGuiMemFreeFunc, void*, const ModHost* Host
-    ) {
+namespace DpsMeter {
+    void Startup(const ModHost* Host) {
         CachedHost = Host;
         LoadSettings();
         Packet::SubscribePacket(Host, &OnCInfo);
@@ -1591,7 +1671,7 @@ extern "C" {
         Packet::SubscribePacket(Host, &OnSu);
     }
 
-    __declspec(dllexport) void ModShutdown() {
+    void Shutdown() {
         if (Window && !Window->isBeingDragged) {
             RememberMeterPosition();
             SaveSettings();
@@ -1600,8 +1680,7 @@ extern "C" {
         CachedHost = nullptr;
     }
 
-    __declspec(dllexport) void ModEarlyTick(const TLBSWidget* RootWidget, const TickContext tickContext) {
-        TLBSWidget* Root = const_cast<TLBSWidget*>(RootWidget);
+    void EarlyTick(TLBSWidget* Root, const TickContext tickContext) {
         if (!CachedHost || !Root || !Root->childrenList) return;
 
         if (!tickContext.isPlayerLoaded) {
@@ -1614,7 +1693,7 @@ extern "C" {
             GameHint::Hide();
             WasLoading = true;
             HoveredRow = -1;
-            EndCurrent = HasCurrent;
+            if (Config.SplitOnMap) EndCurrent = HasCurrent;
             return;
         }
 
@@ -1626,6 +1705,13 @@ extern "C" {
             TotalToggle = nullptr;
             MobPanel = nullptr;
             SettingsWindow = nullptr;
+            for (int i = 0; i < PageCount; i++) {
+                Pages[i] = nullptr;
+                PageTabs[i] = {};
+            }
+            DpsPage = nullptr;
+            ExpSession::ForgetPage();
+            RaidHistory::ForgetPage();
             TargetWidget = nullptr;
             GameHint::Destroy();
             AttachedRoot = Root;
@@ -1670,9 +1756,7 @@ extern "C" {
         RefreshTooltip();
     }
 
-    __declspec(dllexport) void ModTick(const TLBSWidget*, TickContext) {}
-
-    __declspec(dllexport) void ModToggleMainWindow() {
+    void ToggleWindow() {
         ToggleSettings();
     }
 }
