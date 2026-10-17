@@ -30,7 +30,6 @@
 namespace {
     using Clock = std::chrono::steady_clock;
 
-    constexpr auto FightTimeout = std::chrono::seconds(5);
     constexpr auto RefreshInterval = std::chrono::milliseconds(250);
     constexpr double MinActiveSeconds = 3.0;
     constexpr int MaxRows = 10;
@@ -68,6 +67,7 @@ namespace {
         {TEWGuageWidget::ClassName, TEWGuageWidget::Version, TEWGuageWidget::ExpectedSize},
         {TEWLabel::ClassName, TEWLabel::Version, TEWLabel::ExpectedSize},
         {TNTIconWidget::ClassName, TNTIconWidget::Version, TNTIconWidget::ExpectedSize},
+        {TEWEditWidget::ClassName, TEWEditWidget::Version, TEWEditWidget::ExpectedSize},
     };
 
     const SkillCatalog::Skill* FindSkill(const int SkillVNum) {
@@ -144,6 +144,8 @@ namespace {
         bool Locked = false;
         bool BossOnly = false;
         bool ShowTotal = true;
+        bool SplitFights = true;
+        int FightSeconds = 5;
     } Config;
 
     struct SkillTotal {
@@ -239,6 +241,10 @@ namespace {
     bool MobRowChecked[std::size(MobRowChoices)] = {};
     TEWLabel* ShowMeterHelp = nullptr;
     TEWLabel* ShowMobHelp = nullptr;
+    TEWLabel* SplitHelp = nullptr;
+    TEWGraphicButtonWidget* SplitBox = nullptr;
+    WidgetKit::EditBox SecondsBox{};
+    std::wstring ShownSeconds;
     bool SettingsPlaced = false;
     bool MeterShown = false;
     bool WasLoading = true;
@@ -365,6 +371,8 @@ namespace {
         Config.Locked = GetPrivateProfileIntA("DpsMeter", "Locked", 0, Path.c_str()) != 0;
         Config.BossOnly = GetPrivateProfileIntA("DpsMeter", "BossOnly", 0, Path.c_str()) != 0;
         Config.ShowTotal = GetPrivateProfileIntA("DpsMeter", "ShowTotal", 1, Path.c_str()) != 0;
+        Config.SplitFights = GetPrivateProfileIntA("DpsMeter", "SplitFights", 1, Path.c_str()) != 0;
+        Config.FightSeconds = std::max(1, static_cast<int>(GetPrivateProfileIntA("DpsMeter", "FightSeconds", 5, Path.c_str())));
     }
 
     void SaveSettings() {
@@ -380,6 +388,12 @@ namespace {
         WritePrivateProfileStringA("DpsMeter", "Locked", Config.Locked ? "1" : "0", Path.c_str());
         WritePrivateProfileStringA("DpsMeter", "BossOnly", Config.BossOnly ? "1" : "0", Path.c_str());
         WritePrivateProfileStringA("DpsMeter", "ShowTotal", Config.ShowTotal ? "1" : "0", Path.c_str());
+        WritePrivateProfileStringA("DpsMeter", "SplitFights", Config.SplitFights ? "1" : "0", Path.c_str());
+        WritePrivateProfileStringA("DpsMeter", "FightSeconds", std::to_string(Config.FightSeconds).c_str(), Path.c_str());
+    }
+
+    bool FightIdle(const Clock::time_point LastHit, const Clock::time_point Now) {
+        return Config.SplitFights && Now - LastHit > std::chrono::seconds(Config.FightSeconds);
     }
 
     void StartNewFight(const Clock::time_point Now) {
@@ -403,7 +417,7 @@ namespace {
 
     FightView BuildView(const Fight& Source, const bool IsCurrent, const Clock::time_point Now) {
         FightView View;
-        View.Live = IsCurrent && !EndCurrent && Now - Source.LastHit <= FightTimeout;
+        View.Live = IsCurrent && !EndCurrent && !FightIdle(Source.LastHit, Now);
         View.BossFiltered = Config.BossOnly && Source.BossMap;
         View.End = View.Live ? Now : Source.LastHit;
 
@@ -518,7 +532,7 @@ namespace {
         if (Packet.hitMode == HitMode::SuccessfulBuff) return true;
 
         const auto Now = Clock::now();
-        if (!HasCurrent || EndCurrent || Now - Current.LastHit > FightTimeout) {
+        if (!HasCurrent || EndCurrent || FightIdle(Current.LastHit, Now)) {
             StartNewFight(Now);
         }
         Current.LastHit = Now;
@@ -1375,6 +1389,7 @@ namespace {
     void SyncSettingsChecks() {
         WidgetKit::SetChecked(ShowMeterBox, Config.ShowMeter);
         WidgetKit::SetChecked(ShowMobBox, Config.ShowMobDamage);
+        WidgetKit::SetChecked(SplitBox, Config.SplitFights);
         for (size_t i = 0; i < std::size(MobRowChoices); i++) {
             MobRowChecked[i] = Config.MobRows == MobRowChoices[i];
             WidgetKit::SetChecked(MobRowBoxes[i], MobRowChecked[i]);
@@ -1387,6 +1402,27 @@ namespace {
             Show(Window, Config.ShowMeter);
             if (Config.ShowMeter) Window->BubbleUp();
         }
+        SaveSettings();
+        RequestRefresh();
+    }
+
+    void __cdecl OnSplitChanged(void*) {
+        SaveSettings();
+        RequestRefresh();
+    }
+
+    void ReadSecondsBox() {
+        if (!SecondsBox.Edit) return;
+        const std::wstring Text = SecondsBox.Edit->GetText();
+        if (Text == ShownSeconds) return;
+        ShownSeconds = Text;
+        int Seconds = 0;
+        for (const wchar_t Ch : Text) {
+            if (Ch < L'0' || Ch > L'9') return;
+            Seconds = std::min(Seconds * 10 + (Ch - L'0'), 24 * 60 * 60);
+        }
+        if (Seconds < 1 || Seconds == Config.FightSeconds) return;
+        Config.FightSeconds = Seconds;
         SaveSettings();
         RequestRefresh();
     }
@@ -1457,6 +1493,25 @@ namespace {
         }
         Y += 24;
 
+        SplitBox = CheckboxOf(AddSetting(Pad, Y, L"Split fights after", &Config.SplitFights, &OnSplitChanged, nullptr, Right));
+        SecondsBox = WidgetKit::CreateEditBox(CachedHost, static_cast<int16_t>(Right + 4), static_cast<int16_t>(Y - 3), 44, 21);
+        if (SecondsBox.Frame) Attach(SettingsWindow, SecondsBox.Frame);
+        ShownSeconds = std::to_wstring(Config.FightSeconds);
+        if (SecondsBox.Edit) SecondsBox.Edit->SetText(ShownSeconds.c_str());
+        Right = static_cast<int16_t>(Right + 4 + 44 + 6);
+        if (TEWLabel* Unit = Widget::Create<TEWLabel>(CachedHost)) {
+            constexpr wchar_t UnitText[] = L"s idle";
+            const auto Width = static_cast<int16_t>(std::max(10, WidgetKit::MeasureText(1, UnitText) + 4));
+            Place(Unit, Right, Y, Width, 30);
+            Unit->textAlignment = 1;
+            Unit->pxPerLine = Width;
+            Unit->SetText(UnitText);
+            Attach(SettingsWindow, Unit);
+            Right = static_cast<int16_t>(Right + Width);
+        }
+        SplitHelp = AddHelpLabel(SettingsWindow, static_cast<int16_t>(Right + 2), Y);
+        Y += 24;
+
         SetPanelHeight(SettingsWindow, static_cast<uint16_t>(Y + 6));
         SyncSettingsChecks();
         SettingsPlaced = false;
@@ -1469,6 +1524,13 @@ namespace {
             GameHint::Hide();
             return;
         }
+        ReadSecondsBox();
+        static const std::vector<std::wstring> SplitHelpLines = {
+            L"On: a new fight starts once nobody has hit",
+            L"anything for this many seconds.",
+            L"Off: everything on this map adds up into one",
+            L"fight until you change maps.",
+        };
         static const std::vector<std::wstring> MeterHelp = {
             L"Shows the DPS meter window.",
             L"Lock, Boss and Total sit in its title bar;",
@@ -1482,6 +1544,7 @@ namespace {
         const std::vector<std::wstring>* Lines = nullptr;
         if (CursorOver(ShowMeterHelp, HelpWidth, 15)) Lines = &MeterHelp;
         else if (CursorOver(ShowMobHelp, HelpWidth, 15)) Lines = &MobHelp;
+        else if (CursorOver(SplitHelp, HelpWidth, 15)) Lines = &SplitHelpLines;
         if (!Lines) {
             GameHint::Hide();
             return;
