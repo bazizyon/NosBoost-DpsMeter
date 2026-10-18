@@ -16,5 +16,6 @@ namespace ExpSession {
 
     int16_t BuildPage(TLBSWidget* Page, int16_t Width);
     void ForgetPage();
-    void TickPage(const TickContext& Context);
+    void TickPage(TLBSWidget* Root, const TickContext& Context);
+    void ResetView();
 }

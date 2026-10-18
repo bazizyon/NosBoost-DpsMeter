@@ -54,6 +54,7 @@ target_include_directories(Trackers PRIVATE
 )
 
 target_compile_options(Trackers PRIVATE /EHsc /MP)
+target_link_libraries(Trackers PRIVATE Cabinet)
 
 if(NOT DEFINED ENV{CI})
     set_target_properties(Trackers PROPERTIES

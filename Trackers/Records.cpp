@@ -324,7 +324,13 @@ namespace Records {
         }
     }
 
+    int SkillKey(const int SkillVnum, const long Effect) {
+        return SkillVnum >= 0 || Effect <= 0 ? SkillVnum : static_cast<int>(-Effect);
+    }
+
     std::wstring SkillLabel(const int SkillVnum) {
+        if (SkillVnum == -1) return L"Extra damage";
+        if (SkillVnum < -1) return L"Extra damage (effect " + std::to_wstring(-SkillVnum) + L")";
         static bool Done = false;
         static std::chrono::steady_clock::time_point LastAttempt;
         Loaded(Done, LastAttempt, &SkillCatalog::Load);
@@ -398,6 +404,54 @@ namespace Records {
         return {};
     }
 
+    TEWGraphicButtonWidget* AddHitArea(const ModHost* Host, TLBSWidget* Parent, const int16_t X, const int16_t Y,
+                                       const int16_t Width, const int16_t Height) {
+        auto* Area = Widget::Create<TEWGraphicButtonWidget>(Host);
+        if (!Area || !Parent) return Area;
+        delete[] Area->imageData.atlasFrames;
+        Area->imageData.imageName = 1593835585;
+        Area->imageData.frameCount = 3;
+        Area->imageData.atlasFrames = new AtlasFrame[3]{{0, 0, 1, 1}, {0, 0, 1, 1}, {0, 0, 1, 1}};
+        Area->drawMode = 0;
+        Area->color = Color(0, 255, 255, 255);
+        Area->rect = {X, Y, static_cast<int16_t>(X + Width), static_cast<int16_t>(Y + Height)};
+        Area->parent = Parent;
+        Parent->childrenList->push_back(Area);
+        return Area;
+    }
+
+    TEWControlWidget* AddRect(const ModHost* Host, TLBSWidget* Parent, const int16_t X, const int16_t Y, const int16_t Width,
+                              const int16_t Height, const Color& Tint) {
+        auto* Rect = Widget::Create<TEWControlWidget>(Host);
+        if (!Rect) return nullptr;
+        delete[] Rect->imageData.atlasFrames;
+        Rect->imageData.imageName = 1593835568;
+        Rect->imageData.imageWidth = 512;
+        Rect->imageData.imageHeight = 512;
+        Rect->imageData.frameCount = 1;
+        Rect->imageData.atlasFrames = new AtlasFrame[1]{{510, 1, 1, 1}};
+        Rect->color = Tint;
+        Rect->isInteractable = false;
+        Rect->rect = {X, Y, static_cast<int16_t>(X + Width), static_cast<int16_t>(Y + Height)};
+        if (Parent) {
+            Rect->parent = Parent;
+            Parent->childrenList->push_back(Rect);
+        }
+        return Rect;
+    }
+
+    void SetColor(TEWControlWidget* Rect, const Color& Tint) {
+        if (Rect && std::memcmp(&Rect->color, &Tint, sizeof(Color)) != 0) Rect->color = Tint;
+    }
+
+    bool Hovered(const TEWGraphicButtonWidget* Area) {
+        if (!Area || !Area->hovered) return false;
+        for (const TLBSWidget* At = Area; At; At = At->parent) {
+            if (!At->isVisible) return false;
+        }
+        return true;
+    }
+
     TEWLabel* AddLabel(const ModHost* Host, TLBSWidget* Parent, const int16_t X, const int16_t Y, const int16_t Width,
                        const uint8_t Align) {
         TEWLabel* Label = Widget::Create<TEWLabel>(Host);
@@ -421,6 +475,43 @@ namespace Records {
         if (Widget && Widget->isVisible != Visible) Widget->isVisible = Visible;
     }
 
+    bool OnTop(const TLBSWidget* Widget, const int32_t X, const int32_t Y) {
+        if (!Widget) return false;
+        for (const TLBSWidget* At = Widget; At->parent; At = At->parent) {
+            if (!At->isVisible) return false;
+            const TLBSWidget* Parent = At->parent;
+            const TLBSWidgetList* Siblings = Parent->childrenList;
+            if (!Siblings) continue;
+            int32_t Left = 0, Top = 0;
+            for (const TLBSWidget* P = Parent; P; P = P->parent) {
+                Left += P->rect.left;
+                Top += P->rect.top;
+            }
+            const int32_t Index = Siblings->index_of(const_cast<TLBSWidget*>(At));
+            if (Index < 0) continue;
+            for (uint32_t i = static_cast<uint32_t>(Index) + 1; i < Siblings->count; i++) {
+                const TLBSWidget* Other = Siblings->list[i];
+                if (!Other || !Other->isVisible || !Other->isInteractable) continue;
+                if (X >= Left + Other->rect.left && X < Left + Other->rect.right && Y >= Top + Other->rect.top && Y < Top + Other->rect.bottom) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    bool OnTop(const TLBSWidget* Widget, const TickContext& Context) {
+        return OnTop(Widget, Context.mouseX, Context.mouseY);
+    }
+
+    bool OverWindow(const TLBSWidget* Inside, const TickContext& Context) {
+        const TLBSWidget* Window = Inside;
+        while (Window && Window->parent && Window->parent->parent) Window = Window->parent;
+        if (!Window) return false;
+        return Over(Window, static_cast<int16_t>(Window->rect.right - Window->rect.left),
+                    static_cast<int16_t>(Window->rect.bottom - Window->rect.top), Context);
+    }
+
     bool Over(const TLBSWidget* Widget, const int16_t Width, const int16_t Height, const TickContext& Context) {
         if (!Widget) return false;
         int32_t X = 0, Y = 0;
@@ -432,17 +523,19 @@ namespace Records {
     }
 
     void Table::Build(const ModHost* Host, TLBSWidget* Parent, const int16_t X, const int16_t Y, const int16_t TableWidth,
-                      const int RowCount, const int16_t RowStep) {
+                      const int RowCount, const int16_t RowStep, const int ColumnCount) {
         Left = X;
         Top = Y;
         Width = TableWidth;
         Step = RowStep;
         for (auto& Label : Header) Label = AddLabel(Host, Parent, X, Y, 10);
-        Cells.assign(RowCount, std::vector<TEWLabel*>(MaxColumns, nullptr));
+        Cells.assign(RowCount, std::vector<TEWLabel*>(std::clamp(ColumnCount, 1, MaxColumns), nullptr));
         for (int Row = 0; Row < RowCount; Row++) {
             const auto RowY = static_cast<int16_t>(RowTop(Row) + 2 + (Step - 17) / 2);
             for (auto& Label : Cells[Row]) Label = AddLabel(Host, Parent, X, RowY, 10);
         }
+        Hits.assign(RowCount, nullptr);
+        for (int Row = 0; Row < RowCount; Row++) Hits[Row] = AddHitArea(Host, Parent, X, RowTop(Row), TableWidth, Step);
     }
 
     void Table::SetColumns(const std::vector<Column>& Columns) {
@@ -471,15 +564,23 @@ namespace Records {
                 Show(Label, Used);
             };
             Move(Header[C], 0);
-            for (auto& Row : Cells) Move(Row[C], Indent);
+            for (auto& Row : Cells) {
+                if (C < static_cast<int>(Row.size())) Move(Row[C], Indent);
+            }
             SetText(Header[C], Used ? Columns[C].Name : L"", Hint, std::max<int16_t>(W, 1));
             if (Used) X = static_cast<int16_t>(X + W + 4);
+        }
+        for (int Row = 0; Row < static_cast<int>(Hits.size()); Row++) {
+            if (!Hits[Row]) continue;
+            const int16_t Y = RowTop(Row);
+            Hits[Row]->rect = {Left, Y, static_cast<int16_t>(Left + Width), static_cast<int16_t>(Y + Step)};
         }
         ClearRows();
     }
 
     void Table::Set(const int Row, const int Column, const std::wstring& Text, const Color& Tint) {
         if (Row < 0 || Row >= Rows() || Column < 0 || Column >= MaxColumns || !Widths[Column]) return;
+        if (Column >= static_cast<int>(Cells[Row].size())) return;
         SetText(Cells[Row][Column], Text, Tint, std::max(1, Widths[Column] - Indents[Column]));
     }
 
@@ -491,27 +592,45 @@ namespace Records {
         }
     }
 
-    int Table::RowAt(const TickContext& Context) const {
-        for (int Row = 0; Row < Rows(); Row++) {
-            if (Cells[Row][0] && Over(Cells[Row][0], Width, Step, Context)) return Row;
+    int Table::RowAt(const TickContext&) const {
+        if (!Active) return -1;
+        for (int Row = 0; Row < static_cast<int>(Hits.size()); Row++) {
+            if (Hovered(Hits[Row])) return Row;
         }
         return -1;
     }
 
     bool Table::OverCell(const int Row, const int Column, const TickContext& Context) const {
         if (Row < 0 || Row >= Rows() || Column < 0 || Column >= MaxColumns || !Widths[Column]) return false;
-        return Over(Cells[Row][Column], Widths[Column], Step, Context);
+        if (Row < 0 || Row >= Rows() || Column < 0 || Column >= static_cast<int>(Cells[Row].size())) return false;
+        return RowAt(Context) == Row && Over(Cells[Row][Column], Widths[Column], Step, Context);
+    }
+
+    bool Table::Contains(const TickContext& Context) const {
+        return RowAt(Context) >= 0;
+    }
+
+    void Table::SetActive(const bool Value) {
+        if (Active == Value) return;
+        Active = Value;
+        for (TEWGraphicButtonWidget* Hit : Hits) {
+            if (Hit) Hit->isVisible = Value;
+        }
     }
 
     void Table::Forget() {
         for (auto& Label : Header) Label = nullptr;
         Cells.clear();
+        Hits.clear();
+        Active = true;
     }
 
     void Pager::Build(const ModHost* Host, TLBSWidget* Parent, const int16_t CenterX, const int16_t Y) {
         Prev = AddLabel(Host, Parent, static_cast<int16_t>(CenterX - 50), Y, 20);
         Text = AddLabel(Host, Parent, static_cast<int16_t>(CenterX - 30), Y, 60, 3);
         Next = AddLabel(Host, Parent, static_cast<int16_t>(CenterX + 34), Y, 20);
+        PrevHit = AddHitArea(Host, Parent, static_cast<int16_t>(CenterX - 50), Y, 20, 16);
+        NextHit = AddHitArea(Host, Parent, static_cast<int16_t>(CenterX + 34), Y, 20, 16);
     }
 
     void Pager::Center(const int16_t CenterX) {
@@ -523,26 +642,31 @@ namespace Records {
             Parts[i]->rect.left = static_cast<int16_t>(CenterX + Offsets[i]);
             Parts[i]->rect.right = static_cast<int16_t>(Parts[i]->rect.left + W);
         }
+        if (PrevHit) PrevHit->MoveTo(static_cast<int16_t>(CenterX + Offsets[0]), PrevHit->rect.top);
+        if (NextHit) NextHit->MoveTo(static_cast<int16_t>(CenterX + Offsets[2]), NextHit->rect.top);
     }
 
     void Pager::Update(const int Page, const int Pages) {
         SetText(Text, Pages > 1 ? std::to_wstring(Page + 1) + L" / " + std::to_wstring(Pages) : L"", Hint, 60);
         SetText(Prev, Page > 0 ? L"<" : L"", Plain, 20);
         SetText(Next, Page + 1 < Pages ? L">" : L"", Plain, 20);
+        if (PrevHit && PrevHit->isVisible != (Page > 0)) PrevHit->isVisible = Page > 0;
+        if (NextHit && NextHit->isVisible != (Page + 1 < Pages)) NextHit->isVisible = Page + 1 < Pages;
     }
 
-    int Pager::Clicked(const TickContext& Context) const {
-        if (Prev && Over(Prev, 20, 16, Context)) return -1;
-        if (Next && Over(Next, 20, 16, Context)) return 1;
+    int Pager::Clicked(const TickContext&) const {
+        if (Hovered(PrevHit)) return -1;
+        if (Hovered(NextHit)) return 1;
         return 0;
     }
 
     void Pager::Forget() {
         Prev = Text = Next = nullptr;
+        PrevHit = NextHit = nullptr;
     }
 
     bool Clicks::Pressed() {
-        const bool Down = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
+        const bool Down = (GetAsyncKeyState(Key) & 0x8000) != 0;
         const bool Pressed = Down && !WasDown;
         WasDown = Down;
         return Pressed;

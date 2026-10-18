@@ -1,6 +1,8 @@
 #pragma once
 #include "ModContract.h"
 #include "TEWLabel.h"
+#include "TEWGraphicButtonWidget.h"
+#include "TEWControlWidget.h"
 
 #include <cstdint>
 #include <filesystem>
@@ -48,6 +50,7 @@ namespace Records {
     std::wstring Fit(const std::wstring& Text, int Width);
     std::wstring SpName(int Morph);
     std::wstring SkillLabel(int SkillVnum);
+    int SkillKey(int SkillVnum, long Effect);
     int16_t SkillIcon(int SkillVnum);
     std::wstring MapLabel(int MapId);
     std::wstring MinimapMapName(const TLBSWidget* Root);
@@ -62,6 +65,14 @@ namespace Records {
     TEWLabel* AddLabel(const ModHost* Host, TLBSWidget* Parent, int16_t X, int16_t Y, int16_t Width, uint8_t Align = 1);
     void SetText(TEWLabel* Label, const std::wstring& Text, const Color& Tint, int Width);
     void Show(TLBSWidget* Widget, bool Visible);
+    bool OverWindow(const TLBSWidget* Inside, const TickContext& Context);
+    TEWGraphicButtonWidget* AddHitArea(const ModHost* Host, TLBSWidget* Parent, int16_t X, int16_t Y, int16_t Width, int16_t Height);
+    bool Hovered(const TEWGraphicButtonWidget* Area);
+    TEWControlWidget* AddRect(const ModHost* Host, TLBSWidget* Parent, int16_t X, int16_t Y, int16_t Width, int16_t Height, const Color& Tint);
+    void SetColor(TEWControlWidget* Rect, const Color& Tint);
+    bool OnTop(const TLBSWidget* Widget, int32_t X, int32_t Y);
+    bool OnTop(const TLBSWidget* Widget, const TickContext& Context);
+
     bool Over(const TLBSWidget* Widget, int16_t Width, int16_t Height, const TickContext& Context);
 
     struct Column {
@@ -73,8 +84,9 @@ namespace Records {
 
     class Table {
     public:
-        static constexpr int MaxColumns = 10;
-        void Build(const ModHost* Host, TLBSWidget* Parent, int16_t X, int16_t Y, int16_t Width, int Rows, int16_t RowStep = 17);
+        static constexpr int MaxColumns = 12;
+        void Build(const ModHost* Host, TLBSWidget* Parent, int16_t X, int16_t Y, int16_t Width, int Rows, int16_t RowStep = 17,
+                   int ColumnCount = MaxColumns);
         void SetColumns(const std::vector<Column>& Columns);
         void Place(const int16_t X, const int16_t TableWidth) { Left = X; Width = TableWidth; }
         void Set(int Row, int Column, const std::wstring& Text, const Color& Tint = Plain);
@@ -85,6 +97,8 @@ namespace Records {
         int16_t RowTop(int Row) const { return static_cast<int16_t>(Top + (Row + 1) * Step); }
         int16_t ColumnX(int Column) const { return Column >= 0 && Column < MaxColumns ? Lefts[Column] : Left; }
         int16_t Bottom() const { return RowTop(Rows()); }
+        bool Contains(const TickContext& Context) const;
+        void SetActive(bool Active);
         void Forget();
 
     private:
@@ -97,6 +111,8 @@ namespace Records {
         int16_t Indents[MaxColumns]{};
         TEWLabel* Header[MaxColumns]{};
         std::vector<std::vector<TEWLabel*>> Cells;
+        std::vector<TEWGraphicButtonWidget*> Hits;
+        bool Active = true;
     };
 
     class Pager {
@@ -111,13 +127,17 @@ namespace Records {
         TEWLabel* Prev = nullptr;
         TEWLabel* Text = nullptr;
         TEWLabel* Next = nullptr;
+        TEWGraphicButtonWidget* PrevHit = nullptr;
+        TEWGraphicButtonWidget* NextHit = nullptr;
     };
 
     class Clicks {
     public:
+        explicit Clicks(int Key = 1) : Key(Key) {}
         bool Pressed();
 
     private:
+        int Key;
         bool WasDown = false;
     };
 }

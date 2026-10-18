@@ -9,4 +9,5 @@ namespace RaidHistory {
     int16_t BuildPage(TLBSWidget* Page, int16_t Width);
     void ForgetPage();
     void TickPage(TLBSWidget* Root, const TickContext& Context);
+    void ResetView();
 }

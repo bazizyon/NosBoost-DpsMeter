@@ -45,6 +45,7 @@ namespace GameHint {
         TEWLabels* Hint = nullptr;
         TLBSWidget* HintRoot = nullptr;
         std::vector<std::wstring> ShownLines;
+        uint32_t ShownColor = 0xFFFFFFFF;
 
         bool SafeCopy(void* Out, const uintptr_t Address, const size_t Size) {
             __try {
@@ -75,7 +76,7 @@ namespace GameHint {
             return 0;
         }
 
-        void SetLine(const int Index, const std::wstring& Text, const int16_t Width) {
+        void SetLine(const int Index, const std::wstring& Text, const int16_t Width, const uint32_t TextColor) {
             const BSTR Copy = SysAllocString(Text.c_str());
             GameCall::Call(SetLineTextFn, reinterpret_cast<uint32_t>(Hint), static_cast<uint32_t>(Index), reinterpret_cast<uint32_t>(Copy));
             SysFreeString(Copy);
@@ -85,19 +86,22 @@ namespace GameHint {
             Line.pxPerLine = static_cast<uint16_t>(Width);
             Line.isVisible = true;
             TextStyle& Style = Hint->textStyles[Index];
-            Style.textColor = 0xFFFFFFFF;
+            Style.textColor = TextColor;
             Style.textAlignment = 1;
         }
 
-        void Fill(const std::vector<std::wstring>& Lines) {
-            if (Lines == ShownLines) return;
+        void Fill(const std::vector<std::wstring>& Lines, const uint32_t FirstLineColor) {
+            if (Lines == ShownLines && FirstLineColor == ShownColor) return;
             ShownLines = Lines;
+            ShownColor = FirstLineColor;
             int Inner = 60;
             for (const std::wstring& Line : Lines) Inner = std::max(Inner, WidgetKit::MeasureText(Font, Line.c_str()));
             const auto Count = static_cast<uint32_t>(Lines.size());
             GameCall::Call(SetLineCountFn, reinterpret_cast<uint32_t>(Hint), Count, 0);
             if (Hint->lineCount != Count) return;
-            for (size_t i = 0; i < Lines.size(); i++) SetLine(static_cast<int>(i), Lines[i], static_cast<int16_t>(Inner + 2));
+            for (size_t i = 0; i < Lines.size(); i++) {
+                SetLine(static_cast<int>(i), Lines[i], static_cast<int16_t>(Inner + 2), i ? 0xFFFFFFFF : FirstLineColor);
+            }
             Hint->maxTextWidthPx = static_cast<uint16_t>(Inner);
             Hint->rect.right = static_cast<int16_t>(Hint->rect.left + Inner + 2 * Padding);
             Hint->rect.bottom = static_cast<int16_t>(Hint->rect.top + Count * LineHeight + Padding);
@@ -138,9 +142,9 @@ namespace GameHint {
         ShownLines.clear();
     }
 
-    void Show(const std::vector<std::wstring>& Lines, const int32_t MouseX, const int32_t MouseY) {
+    void Show(const std::vector<std::wstring>& Lines, const int32_t MouseX, const int32_t MouseY, const uint32_t FirstLineColor) {
         if (!Hint || Lines.empty()) return;
-        Fill(Lines);
+        Fill(Lines, FirstLineColor);
         const int16_t Width = static_cast<int16_t>(Hint->rect.right - Hint->rect.left);
         const int16_t Height = static_cast<int16_t>(Hint->rect.bottom - Hint->rect.top);
         auto Left = static_cast<int16_t>(MouseX + 12);

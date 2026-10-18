@@ -18,6 +18,7 @@
 #include "SkillCatalog.h"
 #include "MapCatalog.h"
 #include "GameHint.h"
+#include "Records.h"
 #include "Features.h"
 #include "RaidHistory.h"
 
@@ -96,6 +97,7 @@ namespace {
     }
 
     std::wstring SkillName(const int SkillVNum) {
+        if (SkillVNum < 0) return Records::SkillLabel(SkillVNum);
         const SkillCatalog::Skill* Skill = FindSkill(SkillVNum);
         if (Skill && !Skill->Name.empty()) return Skill->Name;
         return L"Skill " + std::to_wstring(SkillVNum);
@@ -163,6 +165,9 @@ namespace {
         bool SplitFights = true;
         int FightSeconds = 5;
         bool SplitOnMap = true;
+        int Page = 0;
+        int SettingsX = -1;
+        int SettingsY = -1;
     } Config;
 
     struct SkillTotal {
@@ -205,6 +210,7 @@ namespace {
         TEWLabel* Dps = nullptr;
         TEWLabel* Total = nullptr;
         TEWLabel* Share = nullptr;
+        TEWGraphicButtonWidget* Hit = nullptr;
         std::wstring ShownName, ShownDps, ShownTotal, ShownShare;
     };
 
@@ -239,6 +245,7 @@ namespace {
     long SelectedId = 0;
 
     TLBSWidget* MobPanel = nullptr;
+    TEWGraphicButtonWidget* MobHit = nullptr;
     TEWLabel* MobTitle = nullptr;
     std::wstring ShownMobTitle;
     MobRow MobRows[MobSlots];
@@ -249,7 +256,7 @@ namespace {
     int MobScroll = 0;
     Clock::time_point LastMobRefresh;
 
-    constexpr uint16_t SettingsWidth = 680;
+    constexpr uint16_t SettingsWidth = 760;
     constexpr int PageCount = 3;
     constexpr int16_t PageTabsTop = 42;
     constexpr int16_t PageShift = 36;
@@ -268,6 +275,7 @@ namespace {
     TEWLabel* ShowMobHelp = nullptr;
     TEWLabel* SplitHelp = nullptr;
     TEWLabel* SplitMapHelp = nullptr;
+    TEWGraphicButtonWidget* HelpHits[4]{};
     TEWGraphicButtonWidget* SplitMapBox = nullptr;
     TEWGraphicButtonWidget* SplitBox = nullptr;
     WidgetKit::EditBox SecondsBox{};
@@ -401,6 +409,9 @@ namespace {
         Config.SplitFights = GetPrivateProfileIntA("DpsMeter", "SplitFights", 1, Path.c_str()) != 0;
         Config.FightSeconds = std::max(1, static_cast<int>(GetPrivateProfileIntA("DpsMeter", "FightSeconds", 5, Path.c_str())));
         Config.SplitOnMap = GetPrivateProfileIntA("DpsMeter", "SplitOnMap", 1, Path.c_str()) != 0;
+        Config.Page = std::clamp(static_cast<int>(GetPrivateProfileIntA("Trackers", "Page", 0, Path.c_str())), 0, 2);
+        Config.SettingsX = static_cast<int>(GetPrivateProfileIntA("Trackers", "X", -1, Path.c_str()));
+        Config.SettingsY = static_cast<int>(GetPrivateProfileIntA("Trackers", "Y", -1, Path.c_str()));
     }
 
     void SaveSettings() {
@@ -419,6 +430,17 @@ namespace {
         WritePrivateProfileStringA("DpsMeter", "SplitFights", Config.SplitFights ? "1" : "0", Path.c_str());
         WritePrivateProfileStringA("DpsMeter", "FightSeconds", std::to_string(Config.FightSeconds).c_str(), Path.c_str());
         WritePrivateProfileStringA("DpsMeter", "SplitOnMap", Config.SplitOnMap ? "1" : "0", Path.c_str());
+        WritePrivateProfileStringA("Trackers", "Page", std::to_string(Config.Page).c_str(), Path.c_str());
+        WritePrivateProfileStringA("Trackers", "X", std::to_string(Config.SettingsX).c_str(), Path.c_str());
+        WritePrivateProfileStringA("Trackers", "Y", std::to_string(Config.SettingsY).c_str(), Path.c_str());
+    }
+
+    void RememberSettingsPlace() {
+        if (!SettingsWindow || !SettingsPlaced) return;
+        if (Config.SettingsX == SettingsWindow->rect.left && Config.SettingsY == SettingsWindow->rect.top) return;
+        Config.SettingsX = SettingsWindow->rect.left;
+        Config.SettingsY = SettingsWindow->rect.top;
+        SaveSettings();
     }
 
     bool FightIdle(const Clock::time_point LastHit, const Clock::time_point Now) {
@@ -572,7 +594,7 @@ namespace {
         const bool Miss = Packet.hitMode == HitMode::Miss || Packet.hitMode == HitMode::LongRangeMiss
                        || Packet.hitMode == HitMode::UnknownMiss;
         const bool Crit = Packet.hitMode == HitMode::CriticalAttack || Packet.hitMode == HitMode::UnknownCriticalAttack;
-        Current.Hits.push_back({Packet.userEntityID, Packet.targetEntityID, Packet.skillVNum,
+        Current.Hits.push_back({Packet.userEntityID, Packet.targetEntityID, Records::SkillKey(Packet.skillVNum, Packet.skillEffect),
                                 std::max(0, Packet.damage), Crit, Miss, Now});
         if (!Packet.targetAlive) MobDamage.erase(Packet.targetEntityID);
         else if (!Miss && Packet.damage > 0) MobDamage[Packet.targetEntityID][Packet.userEntityID] += Packet.damage;
@@ -710,11 +732,13 @@ namespace {
         Row.Dps = AddLabel(Parent, 0, 0, 10, 2);
         Row.Total = AddLabel(Parent, 0, 0, 10, 2);
         Row.Share = AddLabel(Parent, 0, 0, 10, 2);
+        Row.Hit = Records::AddHitArea(CachedHost, Parent, 0, 0, 1, 1);
         return Row;
     }
 
     void PlaceMeterRow(MeterRow& Row, const int16_t Y, const int16_t Width) {
         Place(Row.Bar, Pad, Y, Width, BarHeight);
+        Place(Row.Hit, Pad, Y, Width, BarHeight);
         PlaceColumns(Row.Name, Row.Dps, Row.Total, Row.Share, static_cast<int16_t>(Y + (BarHeight - 12) / 2), Width);
     }
 
@@ -724,6 +748,7 @@ namespace {
         Show(Row.Dps, Visible);
         Show(Row.Total, Visible && Config.ShowTotal);
         Show(Row.Share, Visible);
+        Show(Row.Hit, Visible);
     }
 
     void SetPanelHeight(TEWCustomPanelWidget* Panel, uint16_t Height) {
@@ -1061,8 +1086,11 @@ namespace {
     void DestroyWidgets() {
         GameHint::Destroy();
         Detach(MobPanel);
+        RememberSettingsPlace();
         Detach(SettingsWindow);
         MobPanel = nullptr;
+        MobHit = nullptr;
+        for (auto& Hit : HelpHits) Hit = nullptr;
         SettingsWindow = nullptr;
         TargetWidget = nullptr;
         Detach(Tooltip);
@@ -1189,7 +1217,14 @@ namespace {
     void UpdateHover() {
         int Hovered = -1;
         POINT Cursor;
-        if (Window && Window->isVisible && CursorInGame(Cursor)) {
+        if (Window && Window->isVisible && Window->isInteractable) {
+            for (int i = 0; i < Slots; i++) {
+                if (Records::Hovered(Rows[i].Hit)) {
+                    Hovered = i;
+                    break;
+                }
+            }
+        } else if (Window && Window->isVisible && CursorInGame(Cursor) && Records::OnTop(Window, Cursor.x, Cursor.y)) {
             for (int i = 0; i < Slots; i++) {
                 const TEWGuageWidget* Bar = Rows[i].Bar;
                 if (!Bar || !Bar->isVisible) continue;
@@ -1209,11 +1244,7 @@ namespace {
     }
 
     void ScrollRows(const TickContext& Context) {
-        const POINT TopLeft = AbsoluteTopLeft(Window);
-        if (Context.mouseX < TopLeft.x || Context.mouseX >= TopLeft.x + (Window->rect.right - Window->rect.left)
-            || Context.mouseY < TopLeft.y || Context.mouseY >= TopLeft.y + (Window->rect.bottom - Window->rect.top)) {
-            return;
-        }
+        if (HoveredRow < 0) return;
         const int MaxScroll = std::max(0, static_cast<int>(LastView.Players.size()) - MaxRows);
         const int NewScroll = std::clamp(Scroll + (Context.mouseWheel > 0 ? -1 : 1), 0, MaxScroll);
         if (NewScroll == Scroll) return;
@@ -1310,6 +1341,7 @@ namespace {
             MobSeparator->fillPercent = 1.0f;
             MobSeparator->gaugeColor = Color(255, 120, 120, 120);
         }
+        MobHit = Records::AddHitArea(CachedHost, MobPanel, 0, 0, MobPanelWidth, MobTitleHeight);
         ShownMobTitle.clear();
         LaidOutMobRows = -1;
         ShownMobId = 0;
@@ -1401,8 +1433,13 @@ namespace {
             Place(MobPanel, X, Y, MobPanelWidth, static_cast<int16_t>(MobPanel->rect.bottom - MobPanel->rect.top));
         }
 
+        const auto PanelHeight = static_cast<int16_t>(MobPanel->rect.bottom - MobPanel->rect.top);
+        if (MobHit && (MobHit->rect.right != MobPanelWidth || MobHit->rect.bottom != PanelHeight)) {
+            MobHit->rect = {0, 0, MobPanelWidth, PanelHeight};
+        }
         const bool Hovered = MobPanel->isVisible
-            && CursorOver(MobPanel, MobPanelWidth, static_cast<int16_t>(MobPanel->rect.bottom - MobPanel->rect.top));
+            && (MobPanel->isInteractable ? Records::Hovered(MobHit)
+                                         : CursorOver(MobPanel, MobPanelWidth, PanelHeight) && Records::OnTop(MobPanel, Context));
         if (MobPanel->isInteractable != Hovered) MobPanel->isInteractable = Hovered;
         if (Hovered && Context.mouseWheel != 0) {
             MobScroll += Context.mouseWheel > 0 ? -1 : 1;
@@ -1484,6 +1521,11 @@ namespace {
         Label->textColor = Color(255, 150, 200, 255);
         Label->SetText(L"(?)");
         Attach(Parent, Label);
+        for (auto& Hit : HelpHits) {
+            if (Hit) continue;
+            Hit = Records::AddHitArea(CachedHost, Parent, X, Y, HelpWidth, 15);
+            break;
+        }
         return Label;
     }
 
@@ -1498,6 +1540,10 @@ namespace {
 
     void ShowPage(const int Index) {
         ActivePage = Index;
+        if (Config.Page != Index) {
+            Config.Page = Index;
+            SaveSettings();
+        }
         for (int i = 0; i < PageCount; i++) {
             Show(Pages[i], i == Index);
             WidgetKit::SetTabActive(PageTabs[i], i == Index);
@@ -1585,19 +1631,24 @@ namespace {
         PageHeights[0] = static_cast<uint16_t>(PageShift + Y + 6);
         if (Pages[1]) PageHeights[1] = static_cast<uint16_t>(PageShift + ExpSession::BuildPage(Pages[1], SettingsWidth));
         if (Pages[2]) PageHeights[2] = static_cast<uint16_t>(PageShift + RaidHistory::BuildPage(Pages[2], SettingsWidth));
-        ShowPage(ActivePage);
+        ShowPage(Config.Page);
         SyncSettingsChecks();
         SettingsPlaced = false;
         SettingsWindow->isVisible = false;
         Attach(Root, SettingsWindow);
     }
 
+    WidgetKit::WindowRaiser SettingsRaiser;
+
     void SyncSettings(TLBSWidget* Root, const TickContext& Context) {
         if (!SettingsWindow || !SettingsWindow->isVisible) {
             GameHint::Hide();
             return;
         }
-        if (ActivePage == 1) ExpSession::TickPage(Context);
+        if (ActivePage == 1) {
+            ExpSession::TickPage(Root, Context);
+            return;
+        }
         if (ActivePage == 2) {
             RaidHistory::TickPage(Root, Context);
             return;
@@ -1628,10 +1679,10 @@ namespace {
             L"the most to it. Scroll it with the mouse wheel.",
         };
         const std::vector<std::wstring>* Lines = nullptr;
-        if (CursorOver(ShowMeterHelp, HelpWidth, 15)) Lines = &MeterHelp;
-        else if (CursorOver(ShowMobHelp, HelpWidth, 15)) Lines = &MobHelp;
-        else if (CursorOver(SplitHelp, HelpWidth, 15)) Lines = &SplitHelpLines;
-        else if (CursorOver(SplitMapHelp, HelpWidth, 15)) Lines = &SplitMapLines;
+        const std::vector<std::wstring>* HelpLines[4] = {&MeterHelp, &MobHelp, &SplitHelpLines, &SplitMapLines};
+        for (int i = 0; i < 4; i++) {
+            if (Records::Hovered(HelpHits[i])) Lines = HelpLines[i];
+        }
         if (!Lines) {
             GameHint::Hide();
             return;
@@ -1642,6 +1693,7 @@ namespace {
     void ToggleSettings() {
         if (!SettingsWindow) return;
         if (SettingsWindow->isVisible) {
+            RememberSettingsPlace();
             Show(SettingsWindow, false);
             GameHint::Hide();
             return;
@@ -1650,9 +1702,13 @@ namespace {
             SettingsPlaced = true;
             const int16_t Width = static_cast<int16_t>(SettingsWindow->rect.right - SettingsWindow->rect.left);
             const int16_t Height = static_cast<int16_t>(SettingsWindow->rect.bottom - SettingsWindow->rect.top);
-            Place(SettingsWindow, static_cast<int16_t>((ScreenWidth() - Width) / 2), static_cast<int16_t>((ScreenHeight() - Height) / 2),
-                  Width, Height);
+            const bool Saved = Config.SettingsX >= 0 && Config.SettingsY >= 0 && Config.SettingsX < ScreenWidth() - 40
+                && Config.SettingsY < ScreenHeight() - 40;
+            Place(SettingsWindow, static_cast<int16_t>(Saved ? Config.SettingsX : (ScreenWidth() - Width) / 2),
+                  static_cast<int16_t>(Saved ? Config.SettingsY : (ScreenHeight() - Height) / 2), Width, Height);
         }
+        ExpSession::ResetView();
+        RaidHistory::ResetView();
         SyncSettingsChecks();
         Show(SettingsWindow, true);
         SettingsWindow->BubbleUp();
@@ -1704,6 +1760,8 @@ namespace DpsMeter {
             BossToggle = nullptr;
             TotalToggle = nullptr;
             MobPanel = nullptr;
+            MobHit = nullptr;
+            for (auto& Hit : HelpHits) Hit = nullptr;
             SettingsWindow = nullptr;
             for (int i = 0; i < PageCount; i++) {
                 Pages[i] = nullptr;
@@ -1741,6 +1799,7 @@ namespace DpsMeter {
         SyncMeterPosition();
         SyncMobPanel(Root, tickContext, Clock::now());
         SyncSettings(Root, tickContext);
+        SettingsRaiser.Tick(SettingsWindow, tickContext);
         if (!Window->isVisible) {
             if (Tooltip && Tooltip->isVisible) Tooltip->ToggleVisibilityRecursively(false);
             HoveredRow = -1;
