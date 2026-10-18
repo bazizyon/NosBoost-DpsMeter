@@ -911,13 +911,10 @@ namespace RaidHistory {
             constexpr int64_t Day = 86'400'000LL;
             const int64_t Offset = GermanOffsetMs(NowMs);
             const int64_t Local = NowMs + Offset;
-            int64_t Reset = Local - Local % Day + 2 * 3600'000LL;
+            int64_t Reset = Local - Local % Day;
             if (Weekly) {
                 const int64_t Weekday = (Local / Day + 4) % 7;
                 Reset -= ((Weekday + 6) % 7) * Day;
-                if (Reset > Local) Reset -= 7 * Day;
-            } else if (Reset > Local) {
-                Reset -= Day;
             }
             return Reset - Offset;
         }
@@ -1510,7 +1507,7 @@ namespace RaidHistory {
                 });
             } else {
                 SetLine(1, L"Daily raid quests from the game data. Done means you won that raid enough times since the daily reset.");
-                SetLine(2, L"Whether you took the quest is not known yet.");
+                SetLine(2, L"Counted from your wins, assuming you take the quest each day.");
                 Grid.SetColumns({{L"Daily quest", 300}, {L"Raid", 240, 1, IconSize + 4}, {L"Today", 0, 2}});
                 const auto& Quests = GameData::DailyRaidQuests();
                 FillRows(static_cast<int>(Quests.size()), [&](const int Slot, const int At) {
