@@ -1559,6 +1559,7 @@ namespace {
     void CreateSettingsWindow(TLBSWidget* Root) {
         const WidgetKit::WindowDesc Desc{WidgetKit::WindowStyle::Plain, 0, 0, SettingsWidth, 130, L"Trackers", true};
         SettingsWindow = WidgetKit::CreateGameWindow(CachedHost, Desc);
+        WidgetKit::CloseOnEscape(CachedHost, SettingsWindow);
         if (!SettingsWindow) return;
         SettingsWindow->isRestrictedToScreen = true;
 
